@@ -5,7 +5,9 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 #include <algorithm> //std::min, std::find
+#include <array> //std::array (for duellib_contains)
 #include <numeric> //std::iota
+#include <string_view> //std::string_view (for duellib_contains)
 #include <utility> //std::move, std::swap
 #include "card.h"
 #include "bit.h"
@@ -1867,6 +1869,14 @@ LUA_STATIC_FUNCTION(GetCurrentChain) {
 	const auto real = lua_get<bool, false>(L, 1);
 	const auto& core = pduel->game_field->core;
 	lua_pushinteger(L, real ? core.real_chain_count : core.current_chain.size());
+	return 1;
+}
+LUA_STATIC_FUNCTION(GetReasonEffect) {
+	interpreter::pushobject(L, pduel->game_field->core.reason_effect);
+	return 1;
+}
+LUA_STATIC_FUNCTION(GetReasonPlayer) {
+	lua_pushinteger(L, pduel->game_field->core.reason_player);
 	return 1;
 }
 LUA_STATIC_FUNCTION(GetChainInfo) {
@@ -4188,9 +4198,26 @@ LUA_STATIC_FUNCTION(GetCardSetcodeFromCode) {
 }
 }
 
+// Compile-time proof that a named function is in the registered array.
+// If this fires, the LUA_STATIC_FUNCTION macro didn't register as expected
+// (e.g. placed outside the namespace block) and no amount of rebuilding
+// will make the Lua side see it.
+template<size_t N>
+constexpr bool duellib_contains(const std::array<luaL_Reg, N>& arr, std::string_view name) {
+	for(size_t i = 0; i < N; ++i) {
+		if(arr[i].name != nullptr && std::string_view{ arr[i].name } == name)
+			return true;
+	}
+	return false;
+}
+
 void scriptlib::push_duel_lib(lua_State* L) {
 	static constexpr auto duellib = GET_LUA_FUNCTIONS_ARRAY();
 	static_assert(duellib.back().name == nullptr);
+	static_assert(duellib_contains(duellib, "GetReasonEffect"),
+		"Duel.GetReasonEffect not registered — delta-bagooska proc_workaround will hit a nil");
+	static_assert(duellib_contains(duellib, "GetReasonPlayer"),
+		"Duel.GetReasonPlayer not registered");
 	lua_createtable(L, 0, static_cast<int>(duellib.size() - 1));
 	ensure_luaL_stack(luaL_setfuncs, L, duellib.data(), 0);
 	lua_setglobal(L, "Duel");
