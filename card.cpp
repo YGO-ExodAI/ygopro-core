@@ -185,6 +185,7 @@ void card::get_infos(uint32_t query_flag) {
 			insert_value<uint32_t>(pduel->query_buffer, cmit.first + ((cmit.second[0] + cmit.second[1]) << 16));
 	}
 	CHECK_AND_INSERT_T(QUERY_OWNER, owner, uint8_t);
+	CHECK_AND_INSERT_T(QUERY_ATTACKED_COUNT, attacked_count, uint8_t);
 	CHECK_AND_INSERT(QUERY_STATUS, status);
 	CHECK_AND_INSERT_T(QUERY_IS_PUBLIC, (is_position(POS_FACEUP) || is_related_to_chains() || (current.location == LOCATION_HAND && is_affected_by_effect(EFFECT_PUBLIC))) ? 1 : 0, uint8_t);
 	CHECK_AND_INSERT(QUERY_LSCALE, get_lscale());

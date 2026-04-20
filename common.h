@@ -233,6 +233,7 @@
 #define QUERY_LINK         0x800000
 #define QUERY_IS_HIDDEN	   0x1000000
 #define QUERY_COVER        0x2000000
+#define QUERY_ATTACKED_COUNT 0x4000000
 #define QUERY_END          0x80000000
 
 //Link markers
