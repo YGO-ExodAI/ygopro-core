@@ -1,22 +1,72 @@
 local ocgcore_config=function()
-	files { "*.h", "*.hpp", "*.cpp", "RNG/*.hpp", "RNG/*.cpp" }
+	-- ExodAI Phase P1 Primitive 1: state serialization. The .proto file is
+	-- the committed source; the .pb.cc/.pb.h are generated at build time
+	-- (not committed; .gitignored). A PreBuildEvent below invokes protoc
+	-- from vcpkg's installed tree so the gencode matches vcpkg's runtime
+	-- exactly — avoiding protobuf's strict `PROTOBUF_VERSION != N` check.
+	-- See phase_p1_primitive_1_plan.md §1.3 for the rationale.
+	--
+	-- The .pb.cc/.pb.h are listed explicitly (not via glob) so MSBuild
+	-- treats them as project sources even before the first build has run
+	-- protoc. Fresh checkouts on Linux/mac builds (if we ever enable them)
+	-- would either need `make proto` first or an analogous prebuild hook.
+	files { "*.h", "*.hpp", "*.cpp", "RNG/*.hpp", "RNG/*.cpp",
+		"serialize/ocg_state.proto",
+		"serialize/ocg_state.pb.h",
+		"serialize/ocg_state.pb.cc" }
 	warnings "Extra"
 	cppdialect "C++17"
 	rtti "Off"
-	
+
 	filter "configurations:Release"
-		optimize "Speed"	
+		optimize "Speed"
 	filter "configurations:Debug"
 		optimize "Off"
 	filter "action:not vs*"
 		buildoptions { "-Wno-unused-parameter", "-pedantic" }
-	filter "system:linux"
+	-- Suppress warnings from protobuf-generated .pb.cc sources. Generated
+	-- code trips -Wpedantic (e.g., extra semicolons, unused parameters); we
+	-- don't own it, so silence rather than fix.
+	filter { "action:not vs*", "files:serialize/*.pb.cc" }
+		buildoptions { "-Wno-pedantic", "-Wno-unused-parameter", "-Wno-extra" }
+	filter { "action:vs*", "files:serialize/*.pb.cc" }
+		-- protobuf gencode trips MSVC C4100 (unreferenced formal parameter),
+		-- C4127 (conditional expression is constant), and a handful of
+		-- C5xxx warnings on newer compilers. We don't own this code.
+		disablewarnings { "4100", "4127", "4244", "4267", "4996", "5054" }
+	filter { "system:linux" }
 		linkoptions { "-Wl,--no-undefined" }
 	filter { "system:macosx", "files:processor_visit.cpp" }
 		buildoptions { "-fno-exceptions" }
 	filter {}
+
+	-- Regenerate .pb.cc/.pb.h from .proto before each compile. vcpkg's
+	-- protoc lives under the triplet's tools/protobuf/ subdir. $(VcpkgRoot)
+	-- is set by vcpkg.props (imported via the user-level MSBuild
+	-- integration) and resolves WITHOUT a trailing slash — hence the
+	-- explicit `\installed\` separator below. If the vcpkg integration
+	-- drifts, hardcode to the edopro-vcpkg path here. The regen is cheap
+	-- (empty schema today; a few ms even at full size) and keeps the
+	-- gencode in lockstep with the runtime on every build.
+	filter "action:vs*"
+		prebuildcommands {
+			'"$(VcpkgRoot)\\installed\\$(VcpkgTriplet)\\tools\\protobuf\\protoc.exe" --proto_path="$(SolutionDir)..\\ocgcore\\serialize" --cpp_out="$(SolutionDir)..\\ocgcore\\serialize" "$(SolutionDir)..\\ocgcore\\serialize\\ocg_state.proto"'
+		}
+	filter {}
+
+	-- Protobuf lite runtime pulled in via vcpkg's autolink (VcpkgAutoLink in
+	-- the workspace-level MSBuild integration; see ../premake5.lua:342-346).
+	-- Explicit `links "protobuf-lite"` would fail MSVC because vcpkg installs
+	-- the static lib as `libprotobuf-lite.lib` (lib prefix preserved from
+	-- upstream) and premake's `links` names the bare file, producing a
+	-- missing-file link error. Other vcpkg-installed deps (curl/fmt/etc.)
+	-- work the same way — they don't appear in any `links { }` either.
+	--
+	-- For Linux / macOS builds (which don't currently ship but may later),
+	-- we'd add `"protobuf-lite"` under a `filter "system:not windows"`
+	-- clause; the Unix-style linker adds the `lib` prefix automatically.
 	links { "lua" }
-	includedirs { "lua/src" }
+	includedirs { "lua/src", "serialize" }
 end
 
 if not subproject then

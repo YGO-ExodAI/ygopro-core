@@ -1,0 +1,18 @@
+// Yu-Gi-Oh! duel state serialization schema — ExodAI Phase P1 Primitive 1.
+//
+// Chunk 1: empty placeholder proving the build-dep plumbing works end-to-end.
+// Real schema lands in chunk 2. Do not consume this message in production code;
+// the schema_version field will become the schema's only stable commitment and
+// the rest of the message set will be replaced wholesale.
+
+syntax = "proto3";
+
+package ocg.state;
+
+option optimize_for = LITE_RUNTIME;
+
+message DuelStatePlaceholder {
+  // Bump on breaking schema changes. Runtime load rejects blobs whose
+  // schema_version exceeds what the linked ocgcore supports.
+  uint32 schema_version = 1;
+}

@@ -1,0 +1,11 @@
+# Generated protobuf sources — regenerated at build time in each build system
+# (xmake on the ygoenv side invokes its own protoc via add_rules("protobuf.cpp");
+# premake+MSBuild on the EDOPro side invokes vcpkg's protoc via a prebuild step).
+#
+# Cross-version gencode compatibility is strict in protobuf's modern runtime
+# (PROTOBUF_VERSION must match exactly between gencode and runtime), and our
+# two build systems source protobuf from different registries with different
+# version catalogs, so committing the generated files was untenable. See
+# src/docs/phase_p1_primitive_1_plan.md §1.3 for the full reasoning.
+*.pb.cc
+*.pb.h
