@@ -18,7 +18,7 @@
 # overlapping version, so any single committed .pb.cc would only be
 # loadable by one side. See phase_p1_primitive_1_plan.md §1.3.
 
-PROTOC ?= xrepo env -b protobuf-cpp protoc
+PROTOC ?= xrepo env -b "protobuf-cpp 28.x" protoc
 PROTO_SRC := ocg_state.proto
 PROTO_GEN := ocg_state.pb.cc ocg_state.pb.h
 

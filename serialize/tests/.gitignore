@@ -1,0 +1,11 @@
+# xmake build artifacts
+.xmake/
+build/
+test_schema
+test_handles
+*.o
+
+# Mirror — earlier approach; current xmake.lua generates into build/gen/
+# and doesn't need this file present, but `make clean` on the parent
+# Makefile may still produce it. Keep ignored.
+ocg_state.proto

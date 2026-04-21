@@ -1,9 +1,23 @@
 // Yu-Gi-Oh! duel state serialization schema — ExodAI Phase P1 Primitive 1.
 //
-// Chunk 1: empty placeholder proving the build-dep plumbing works end-to-end.
-// Real schema lands in chunk 2. Do not consume this message in production code;
-// the schema_version field will become the schema's only stable commitment and
-// the rest of the message set will be replaced wholesale.
+// Chunk 2: structural schema for the engine state tree (duel + field +
+// players + cards + effects + groups + chain + processor + RNG + Lua
+// reconstruction). Field set per phase_p1_primitive_1_plan.md §4.2.
+//
+// Cross-references between objects use uint32 integer handles (NOT pointers).
+// Per §3.3:
+//   - Handle 0 is reserved as the null-sentinel ("no reference").
+//   - Real objects receive handles starting at 1.
+//   - Optional fields use 0 to mean "unset"; protobuf optional/oneof
+//     wrappers are deliberately NOT used (per §3.3 alternative-rejected).
+//
+// Top-level subtrees (`cards`, `effects`, `groups`, `chain`, `processor`,
+// `lua`) are kept separable per §6.3 so Phase 2's arena-clone walk can
+// populate each slot independently.
+//
+// Lua-side reconstruction data (`LuaReconstruction`) is in its own message
+// and not interleaved with structural state; Phase 2 will rebuild Lua per
+// clone and skip this subtree.
 
 syntax = "proto3";
 
@@ -11,8 +25,389 @@ package ocg.state;
 
 option optimize_for = LITE_RUNTIME;
 
-message DuelStatePlaceholder {
-  // Bump on breaking schema changes. Runtime load rejects blobs whose
-  // schema_version exceeds what the linked ocgcore supports.
-  uint32 schema_version = 1;
+// ---------------------------------------------------------------------------
+// Top level
+// ---------------------------------------------------------------------------
+
+message DuelState {
+    // Bump on breaking schema changes. Loaders reject blobs whose
+    // schema_version exceeds what the linked ocgcore supports.
+    uint32 schema_version = 1;
+
+    // First 8 hex chars of the ocgcore git SHA at save time. Sidecar JSON
+    // carries the full SHA; this field is a quick sanity check at load.
+    uint64 engine_build_hash = 2;
+
+    // UNIX seconds since epoch.
+    uint64 timestamp_unix = 3;
+
+    enum SaveSafety {
+        SAVE_SAFETY_OK = 0;
+        SAVE_SAFETY_REFUSE = 1;
+    }
+    SaveSafety save_safety = 4;
+    string refuse_reason = 5;  // empty unless save_safety == REFUSE
+
+    RngState rng = 10;
+    FieldInfo field_info = 11;
+    repeated PlayerState players = 12;       // size 2: [0] = first, [1] = second
+    repeated CardRecord cards = 13;
+    repeated EffectRecord effects = 14;
+    repeated GroupRecord groups = 15;
+    ChainStack chain = 16;
+    ProcessorState processor = 17;
+
+    // Separable per §6.3 — Phase 2 will rebuild Lua state from scratch per
+    // clone and skip this subtree.
+    LuaReconstruction lua = 20;
+}
+
+// ---------------------------------------------------------------------------
+// RNG
+// ---------------------------------------------------------------------------
+
+message RngState {
+    // Xoshiro256** state: exactly 4 uint64 values per RNG/Xoshiro256.hpp.
+    // Single stream (duel.h:120 `RNG::Xoshiro256StarStar random`); deck
+    // shuffle, coin flip, dice, effect RNG all draw from this generator.
+    repeated uint64 xoshiro_state = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Field-wide info (mirrors ocgcore field.h:161 `field_info`)
+// ---------------------------------------------------------------------------
+
+message FieldInfo {
+    uint32 event_id = 1;
+    uint32 field_id = 2;
+    uint32 copy_id = 3;            // uint16 in C++; widen to uint32 for proto
+    int32 turn_id = 4;             // int16 in C++; widen for proto
+    int32 turn_id_player_0 = 5;
+    int32 turn_id_player_1 = 6;
+    uint32 card_id = 7;
+    uint32 phase = 8;              // uint16 in C++
+    uint32 turn_player = 9;        // uint8 in C++
+    uint32 priority_player_0 = 10;
+    uint32 priority_player_1 = 11;
+    bool can_shuffle = 12;
+}
+
+// ---------------------------------------------------------------------------
+// Per-player state (mirrors ocgcore field.h:81 `player_info`)
+// ---------------------------------------------------------------------------
+
+message PlayerState {
+    int32 lp = 1;
+    int32 start_lp = 2;
+    int32 start_count = 3;
+    int32 draw_count = 4;
+    uint32 used_location = 5;
+    uint32 disabled_location = 6;
+    uint32 extra_p_count = 7;
+    uint32 exchanges = 8;
+    uint32 tag_index = 9;
+    bool recharge = 10;
+
+    // Per-zone card lists. Each entry is a card handle (uint32, 0 = empty
+    // slot). list_mzone is fixed-size 7, list_szone fixed-size 8 per
+    // player_info ctor at field.h:103-113.
+    repeated uint32 list_mzone = 20;
+    repeated uint32 list_szone = 21;
+    repeated uint32 list_main = 22;
+    repeated uint32 list_grave = 23;
+    repeated uint32 list_hand = 24;
+    repeated uint32 list_remove = 25;
+    repeated uint32 list_extra = 26;
+}
+
+// ---------------------------------------------------------------------------
+// Card state snapshot (mirrors ocgcore card.h:33 `card_state`)
+// ---------------------------------------------------------------------------
+
+message CardStateSnapshot {
+    uint32 code = 1;
+    uint32 code2 = 2;
+    repeated uint32 setcodes = 3;     // uint16 in C++; widen for proto
+    uint32 type = 4;
+    uint32 level = 5;
+    uint32 rank = 6;
+    uint32 link = 7;
+    uint32 link_marker = 8;
+    uint32 lscale = 9;
+    uint32 rscale = 10;
+    uint32 attribute = 11;
+    uint64 race = 12;
+    int32 attack = 13;
+    int32 defense = 14;
+    int32 base_attack = 15;
+    int32 base_defense = 16;
+    uint32 controler = 17;
+    uint32 location = 18;
+    uint32 sequence = 19;
+    uint32 position = 20;
+    uint32 reason = 21;
+    bool pzone = 22;
+
+    uint32 reason_card_handle = 30;     // → CardRecord; 0 = none
+    uint32 reason_effect_handle = 31;   // → EffectRecord; 0 = none
+    uint32 reason_player = 32;
+}
+
+// ---------------------------------------------------------------------------
+// Card record — full per-card state (mirrors ocgcore card.h:81 `class card`)
+// ---------------------------------------------------------------------------
+
+message Counter {
+    uint32 counter_id = 1;            // uint16 in C++
+    uint32 count_resettable = 2;
+    uint32 count_unresettable = 3;
+}
+
+message EffectRef {
+    uint32 effect_handle = 1;
+    uint32 key = 2;                   // multimap key (effect's `code` typically)
+}
+
+message CardRecord {
+    uint32 handle = 1;                // assigned at serialize time
+
+    // Three copies of card_state per ocgcore semantics
+    CardStateSnapshot current = 10;
+    CardStateSnapshot previous = 11;
+    CardStateSnapshot temp = 12;
+
+    // Effect containers from card.h (single_effect, field_effect,
+    // equip_effect, target_effect, xmaterial_effect — multimap<uint32, effect*>)
+    repeated EffectRef single_effect = 20;
+    repeated EffectRef field_effect = 21;
+    repeated EffectRef equip_effect = 22;
+    repeated EffectRef target_effect = 23;
+    repeated EffectRef xmaterial_effect = 24;
+
+    // Counters map<uint16, array<uint16,2>>
+    repeated Counter counters = 30;
+
+    // Equip / overlay / relations
+    uint32 equip_target_handle = 40;        // 0 = none
+    repeated uint32 equip_cards = 41;       // card handles
+    repeated uint32 overlay_cards = 42;     // card handles (xyz materials)
+    repeated CardRelation relations = 43;
+}
+
+message CardRelation {
+    uint32 card_handle = 1;
+    uint32 relation_flags = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Effect record (mirrors ocgcore effect.h:24 `class effect`)
+// ---------------------------------------------------------------------------
+
+message EffectRecord {
+    uint32 handle = 1;
+
+    uint32 count_limit = 10;          // uint8 in C++
+    uint32 count_limit_max = 11;
+    uint32 count_flag = 12;
+    uint32 count_hopt_index = 13;
+    uint32 effect_owner = 14;         // PLAYER_NONE-style sentinel
+    uint32 type = 15;                 // uint16 in C++
+    uint32 copy_id = 16;
+    uint32 range = 17;
+    uint32 s_range = 18;
+    uint32 o_range = 19;
+    uint32 reset_count = 20;
+    uint32 active_location = 21;
+    uint32 active_sequence = 22;
+    uint32 status = 23;
+    uint32 code = 24;
+    uint32 flag_lo = 25;              // C++ stores flag[2]; pack as lo/hi
+    uint32 flag_hi = 26;
+    uint32 id = 27;
+    uint32 initial_id = 28;
+    uint32 reset_flag = 29;
+    uint32 count_code = 30;
+    uint32 category = 31;
+    uint32 hint_timing_lo = 32;
+    uint32 hint_timing_hi = 33;
+    uint32 card_type = 34;
+    uint32 active_type = 35;
+    int32 label_object = 36;
+
+    // Lua callback slots — int32 lua-ref handles in C++. Reconstruction
+    // ties these back to the Lua registry via LuaReconstruction.closures
+    // when the closure was registered via a Type-C generator pattern;
+    // otherwise the engine's `initial_effect` re-run repopulates them.
+    int32 condition_ref = 40;
+    int32 cost_ref = 41;
+    int32 target_ref = 42;
+    int32 value_ref = 43;
+    int32 operation_ref = 44;
+
+    // Owner / handler are card handles (card* in C++). 0 = nullptr.
+    uint32 owner_card_handle = 50;
+    uint32 handler_card_handle = 51;
+    uint32 active_handler_card_handle = 52;
+
+    uint64 description = 60;
+    repeated int64 label = 61;        // std::vector<lua_Integer> in C++
+}
+
+// ---------------------------------------------------------------------------
+// Group record (set of card handles)
+// ---------------------------------------------------------------------------
+
+message GroupRecord {
+    uint32 handle = 1;
+    repeated uint32 card_handles = 2;
+    bool is_readonly = 3;             // distinguishes duel.groups vs duel.sgroups
+}
+
+// ---------------------------------------------------------------------------
+// Chain stack (mirrors ocgcore field.h:48 `struct chain` + processor lists)
+// ---------------------------------------------------------------------------
+
+message ChainStack {
+    repeated ChainLink links = 1;             // current_chain, deepest = last
+    repeated PendingChain tp_pending = 2;     // tpchain
+    repeated PendingChain ntp_pending = 3;    // ntpchain
+    repeated PendingChain select_chains = 4;
+}
+
+message ChainLink {
+    CardStateSnapshot triggering_state = 1;
+
+    uint32 chain_count = 10;
+    uint32 chain_id = 11;                     // uint16 in C++
+    uint32 triggering_player = 12;
+    uint32 triggering_controler = 13;
+    uint32 triggering_position = 14;
+    uint32 target_player = 15;
+    uint32 disable_player = 16;
+    uint32 triggering_summon_location = 17;
+    bool triggering_summon_proc_complete = 18;
+    bool was_just_sent = 19;
+    uint32 triggering_location = 20;
+    uint32 triggering_sequence = 21;
+    uint32 triggering_status = 22;
+    uint32 triggering_summon_type = 23;
+    int32 replace_op = 24;
+    int32 target_param = 25;
+    uint32 flag = 26;
+    uint32 event_id = 27;
+
+    uint32 triggering_effect_handle = 40;     // → EffectRecord
+    uint32 target_cards_group_handle = 41;    // → GroupRecord
+    uint32 disable_reason_handle = 42;        // → EffectRecord
+
+    repeated OperationInfo opinfos = 50;
+    repeated OperationInfo possibleopinfos = 51;
+
+    // tevent payload
+    EventPayload triggering_event = 60;
+}
+
+message PendingChain {
+    uint32 chain_id = 1;
+    uint32 triggering_effect_handle = 2;
+    uint32 triggering_player = 3;
+}
+
+message OperationInfo {
+    uint32 key = 1;                   // map<uint32_t, optarget> key
+    uint32 op_player = 2;
+    int32 op_param = 3;
+    uint32 op_target_group_handle = 4;
+    uint32 op_target_card_handle = 5;
+}
+
+message EventPayload {
+    uint32 event_code = 1;
+    uint32 event_player = 2;
+    uint32 event_value = 3;
+    uint32 event_reason = 4;
+    uint32 event_reason_player = 5;
+    uint32 event_target_group_handle = 6;
+    uint32 event_reason_effect_handle = 7;
+    uint32 event_reason_card_handle = 8;
+}
+
+// ---------------------------------------------------------------------------
+// Processor state (mirrors field.processor / processor.h)
+// ---------------------------------------------------------------------------
+
+message ProcessorState {
+    repeated ProcessorUnit units = 1;
+    repeated ProcessorUnit subunits = 2;
+
+    // Selection / decision context that survives MSG boundaries
+    uint32 select_min = 10;
+    uint32 select_max = 11;
+    bool select_cancelable = 12;
+    uint64 select_hint = 13;
+    repeated uint32 select_card_handles = 14;
+}
+
+message ProcessorUnit {
+    uint32 unit_type = 1;
+    int32 step = 2;
+    int32 peffect_handle = 3;         // → EffectRecord
+    uint32 ptarget_handle = 4;        // → GroupRecord
+    int64 arg1 = 5;
+    int64 arg2 = 6;
+    int64 arg3 = 7;
+    int64 arg4 = 8;
+    int64 ptr1 = 9;                   // raw int from processor.h's int_ptr*
+    int64 ptr2 = 10;
+}
+
+// ---------------------------------------------------------------------------
+// Lua reconstruction (separable per §6.3 / Strategy A-refined per §4.6)
+// ---------------------------------------------------------------------------
+
+message LuaReconstruction {
+    // For each effect registered via a Type-C closure (see scoping doc
+    // §10.1), record (card_handle, effect_slot, generator_name,
+    // captured_args) so the load path can re-invoke the generator with
+    // the serialized args and re-register the closure on a fresh Lua VM.
+    repeated ClosureRegistration closures = 1;
+
+    // Reserved for future Lua-side state we discover during chunks 5-6
+    // that doesn't fit the closure-reconstruction model. Currently empty;
+    // filling it is a §11 risk-row escalation, not a default expectation.
+    bytes opaque_lua_state = 99;
+}
+
+message ClosureRegistration {
+    uint32 card_handle = 1;
+    uint32 effect_handle = 2;
+
+    enum Slot {
+        SLOT_UNSPECIFIED = 0;
+        SLOT_CONDITION = 1;
+        SLOT_COST = 2;
+        SLOT_TARGET = 3;
+        SLOT_OPERATION = 4;
+        SLOT_VALUE = 5;
+    }
+    Slot slot = 3;
+
+    // Identifies the Lua function that, when re-invoked with `captured_args`,
+    // produces an equivalent closure. e.g. "s.extrafil", "s.spcon".
+    // Resolved against the card's Lua module at load time.
+    string generator_name = 4;
+
+    repeated CapturedArg captured_args = 5;
+}
+
+message CapturedArg {
+    oneof value {
+        bool b = 1;
+        int64 i = 2;
+        double d = 3;
+        string s = 4;
+        uint32 card_handle = 5;
+        uint32 group_handle = 6;
+        uint32 effect_handle = 7;
+    }
 }
