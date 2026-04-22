@@ -240,6 +240,25 @@ message CardRelation {
 // Effect record (mirrors ocgcore effect.h:24 `class effect`)
 // ---------------------------------------------------------------------------
 
+// Chunk 5b Wave 2: Lua callback dump+restore mechanism per plan §13.4.
+// One per effect callback slot (condition/cost/target/value/operation/
+// label_object). Bytecode is the result of lua_dump(L, writer, ud, strip=0).
+// Upvalues are walked via lua_getupvalue and classified per plan §13.1.
+message LuaCallback {
+    // false = the slot has no callback set (effect's <slot>_ref was 0
+    // at save time). Distinguishes "callback explicitly absent" from
+    // "callback present but bytecode happens to be empty".
+    bool present = 1;
+    // Lua bytecode bytes. Portable within the same Lua build (we use
+    // the lua_amalgam bundled with edopro-core, so save and load sides
+    // always have identical Lua versions).
+    bytes bytecode = 2;
+    // Captured upvalues, in slot order (1-indexed in the Lua API; we
+    // store them 0-indexed here, position N in this list = upvalue N+1
+    // on load via lua_setupvalue).
+    repeated CapturedArg upvalues = 3;
+}
+
 message EffectRecord {
     uint32 handle = 1;
 
@@ -288,6 +307,19 @@ message EffectRecord {
 
     uint64 description = 60;
     repeated int64 label = 61;        // std::vector<lua_Integer> in C++
+
+    // Chunk 5b Wave 2: bytecode-dumped Lua callbacks (per plan §13.4).
+    // Replace the int32 *_ref fields above (which were chunk-3
+    // placeholders — meaningless across Lua VMs). When `present=true`,
+    // load uses these to reconstitute the callback; the int32 ref is
+    // ignored.
+    LuaCallback condition_callback = 100;
+    LuaCallback cost_callback = 101;
+    LuaCallback target_callback = 102;
+    LuaCallback value_callback = 103;
+    LuaCallback operation_callback = 104;
+    // Note: label_object handled separately if needed (chunk 5b can defer;
+    // none of the audit-confirmed Type-C cases capture it as upvalue).
 }
 
 // ---------------------------------------------------------------------------
@@ -446,5 +478,14 @@ message CapturedArg {
         uint32 card_handle = 5;
         uint32 group_handle = 6;
         uint32 effect_handle = 7;
+
+        // Chunk 5b Wave 2 finding: every ProjectIgnis card script begins
+        // with `local s,id=GetID()`, so any top-level function defined
+        // in that script captures `s` (= the engine's _G["c<code>"]
+        // class table) as an upvalue. Without explicit handling the
+        // table classifies as UNKNOWN and refuses save.
+        // script_self_card_code = the owning card's konami code; load
+        // resolves via _G["c<code>"], which exists post-card-script-load.
+        uint32 script_self_card_code = 8;
     }
 }

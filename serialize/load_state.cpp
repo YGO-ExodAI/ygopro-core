@@ -1,15 +1,20 @@
 #include "load_state.h"
 
 #include "handle_table.h"
+#include "lua_callback.h"
 #include "ocg_state.pb.h"
 #include "save_state.h"  // kSchemaVersion
 
 #include "../card.h"
 #include "../duel.h"
+#include "../effect.h"
 #include "../field.h"
+#include "../group.h"
+#include "../interpreter.h"
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <new>
 #include <vector>
 
@@ -181,6 +186,134 @@ void load_card_record(const pb::CardRecord& src, card* dst,
     // until then.
 }
 
+// ---------------------------------------------------------------------------
+// Chunk 5b Wave 2: effect / group / chain-link / card-effect-ref load
+// helpers. Called from the named passes in deserialize_duel per plan §13.3.
+// ---------------------------------------------------------------------------
+
+void load_effect_record_scalars(const pb::EffectRecord& src, effect* dst,
+                                 const HandleResolver<card>& hc) {
+    // Mirror of write_effect_record from save_state.cpp.
+    dst->count_limit = static_cast<uint8_t>(src.count_limit());
+    dst->count_limit_max = static_cast<uint8_t>(src.count_limit_max());
+    dst->count_flag = static_cast<uint8_t>(src.count_flag());
+    dst->count_hopt_index = static_cast<uint8_t>(src.count_hopt_index());
+    dst->effect_owner = static_cast<uint8_t>(src.effect_owner());
+    dst->type = static_cast<uint16_t>(src.type());
+    dst->copy_id = static_cast<uint16_t>(src.copy_id());
+    dst->range = static_cast<uint16_t>(src.range());
+    dst->s_range = static_cast<uint16_t>(src.s_range());
+    dst->o_range = static_cast<uint16_t>(src.o_range());
+    dst->reset_count = static_cast<uint16_t>(src.reset_count());
+    dst->active_location = static_cast<uint16_t>(src.active_location());
+    dst->active_sequence = static_cast<uint16_t>(src.active_sequence());
+    dst->status = static_cast<uint16_t>(src.status());
+    dst->code = src.code();
+    dst->flag[0] = src.flag_lo();
+    dst->flag[1] = src.flag_hi();
+    dst->id = src.id();
+    dst->initial_id = src.initial_id();
+    dst->reset_flag = src.reset_flag();
+    dst->count_code = src.count_code();
+    dst->category = src.category();
+    dst->hint_timing[0] = src.hint_timing_lo();
+    dst->hint_timing[1] = src.hint_timing_hi();
+    dst->card_type = src.card_type();
+    dst->active_type = src.active_type();
+    dst->label_object = src.label_object();
+    // Note: condition / cost / target / value / operation are int32 lua
+    // refs in C++. Set later via restore_lua_callback after the Lua VM
+    // has the bytecode loaded. They stay 0 (no callback) until restoration.
+    dst->owner = hc.lookup(src.owner_card_handle());
+    dst->handler = hc.lookup(src.handler_card_handle());
+    dst->active_handler = hc.lookup(src.active_handler_card_handle());
+    dst->description = src.description();
+    dst->label.clear();
+    for (auto v : src.label()) dst->label.push_back(v);
+}
+
+// Restore the Lua callback bytecode + upvalues for an effect's slot.
+// Returns true on success, false if the saved callback was malformed
+// (load_error filled).
+bool restore_effect_callback(const pb::LuaCallback& src, int32_t* dst_ref,
+                              lua_State* L,
+                              HandleResolver<card>& hc,
+                              HandleResolver<effect>& he,
+                              HandleResolver<group>& hg,
+                              std::string* load_error) {
+    if (!src.present()) {
+        *dst_ref = 0;
+        return true;
+    }
+    *dst_ref = restore_lua_callback(L, src, hc, he, hg, load_error);
+    if (*dst_ref == 0 && !load_error->empty()) {
+        return false;
+    }
+    return true;
+}
+
+// Pass 6: populate card.{single,field,equip,target,xmaterial}_effect from
+// saved EffectRefs after both cards (pass 1) and effects (pass 3) exist.
+void load_card_effect_container_refs(const pb::CardRecord& src, card* dst,
+                                      const HandleResolver<effect>& he) {
+    auto fill = [&he](card::effect_container& container,
+                      const auto& src_refs) {
+        container.clear();
+        for (const auto& er : src_refs) {
+            if (effect* e = he.lookup(er.effect_handle())) {
+                container.emplace(er.key(), e);
+            }
+        }
+    };
+    fill(dst->single_effect, src.single_effect());
+    fill(dst->field_effect, src.field_effect());
+    fill(dst->equip_effect, src.equip_effect());
+    fill(dst->target_effect, src.target_effect());
+    fill(dst->xmaterial_effect, src.xmaterial_effect());
+}
+
+// Group load: populate the group's container from saved card_handles.
+void load_group_record(const pb::GroupRecord& src, group* dst,
+                       const HandleResolver<card>& hc) {
+    dst->is_readonly = src.is_readonly() ? 1 : 0;
+    dst->container.clear();
+    for (uint32_t h : src.card_handles()) {
+        if (card* c = hc.lookup(h)) dst->container.insert(c);
+    }
+}
+
+// Chain link load: mirror of write_chain_link.
+void load_chain_link(const pb::ChainLink& src, chain* dst,
+                     const HandleResolver<card>& hc,
+                     const HandleResolver<effect>& he,
+                     const HandleResolver<group>& hg) {
+    load_card_state(src.triggering_state(), &dst->triggering_state, hc, he);
+    dst->chain_count = static_cast<uint8_t>(src.chain_count());
+    dst->chain_id = static_cast<uint16_t>(src.chain_id());
+    dst->triggering_player = static_cast<uint8_t>(src.triggering_player());
+    dst->triggering_controler = static_cast<uint8_t>(src.triggering_controler());
+    dst->triggering_position = static_cast<uint8_t>(src.triggering_position());
+    dst->target_player = static_cast<uint8_t>(src.target_player());
+    dst->disable_player = static_cast<uint8_t>(src.disable_player());
+    dst->triggering_summon_location = static_cast<uint8_t>(
+        src.triggering_summon_location());
+    dst->triggering_summon_proc_complete = src.triggering_summon_proc_complete();
+    dst->was_just_sent = src.was_just_sent();
+    dst->triggering_location = static_cast<uint16_t>(src.triggering_location());
+    dst->triggering_sequence = src.triggering_sequence();
+    dst->triggering_status = src.triggering_status();
+    dst->triggering_summon_type = src.triggering_summon_type();
+    dst->replace_op = src.replace_op();
+    dst->target_param = src.target_param();
+    dst->flag = src.flag();
+    dst->event_id = src.event_id();
+    dst->triggering_effect = he.lookup(src.triggering_effect_handle());
+    dst->target_cards = hg.lookup(src.target_cards_group_handle());
+    dst->disable_reason = he.lookup(src.disable_reason_handle());
+    // opinfos / triggering_event left as defaults — chunk 5b doesn't
+    // populate them on save either (chunk-3 stub still applies).
+}
+
 }  // namespace
 
 OCG_LoadStatus deserialize_duel(const void* buffer, std::size_t size,
@@ -248,76 +381,181 @@ OCG_LoadStatus deserialize_duel(const void* buffer, std::size_t size,
         d->set_rng_state(s);
     }
 
-    // Chunk-5a fail-loud: still refuse subtrees the chunk-5a walks don't
-    // handle. Effects, groups, chain.links, and Lua reconstruction are
-    // all chunk-5b deliverables. Any blob with these set was emitted by
-    // a future chunk's save path.
-    if (state.effects_size() != 0 || state.groups_size() != 0 ||
-        (state.has_chain() && state.chain().links_size() != 0) ||
-        state.lua().closures_size() != 0) {
+    // Chunk-5b Wave 2 fail-loud: lua.closures is the legacy
+    // ClosureRegistration array. Chunk 5b uses per-effect LuaCallback
+    // bytecode dump (EffectRecord.*_callback) instead, so closures
+    // should always be empty.
+    if (state.lua().closures_size() != 0) {
         delete d;
         *load_error =
-            "chunk-5a stub: load path doesn't yet restore effects, "
-            "groups, chain-links, or lua-reconstruction. Save side also "
-            "refuses to emit these. If you're seeing this error, the blob "
-            "came from a future chunk's save path.";
+            "load: state.lua.closures is non-empty. Chunk 5b uses "
+            "per-effect LuaCallback bytecode dump (EffectRecord.*_callback) "
+            "instead of the LuaReconstruction.closures path. A blob with "
+            "lua.closures populated came from a different save mechanism.";
         return OCG_LOAD_ERR_INTERNAL;
     }
 
-    // Allocate fresh cards in handle order. Each card is created via
-    // duel::new_card(code), which triggers the host's cardReader to
-    // populate card_data. Then we register the new pointer under the
-    // saved handle so cross-references resolve in the second pass.
+    // 9-pass walk per plan §13.3. Functions named by dependency to make
+    // ordering structural rather than comment-only. Debug asserts at
+    // each pass entry validate prior-pass invariants.
+
     HandleResolver<card> hc;
-    HandleResolver<effect> he;  // empty in 5a; passed to load_card_state
-                                // for reason_effect lookups (always 0 in 5a)
+    HandleResolver<effect> he;
+    HandleResolver<group> hg;
+
+    // -----------------------------------------------------------------
+    // Pass 1: allocate cards via duel::new_card(data_code).
+    // -----------------------------------------------------------------
+    std::vector<card*> allocated_cards;
+    allocated_cards.reserve(state.cards_size());
+    int new_card_count = 0;
+    for (const auto& cr : state.cards()) {
+        const uint32_t code = cr.data_code() != 0 ? cr.data_code()
+                                                   : cr.current().code();
+        card* c = d->new_card(code);
+        ++new_card_count;
+        allocated_cards.push_back(c);
+        hc.register_handle(cr.handle(), c);
+    }
+    (void)new_card_count;  // suppress unused-warning when asserts are off
+
+    // -----------------------------------------------------------------
+    // Pass 1.5: clear engine-created initial_effect artifacts.
+    //
+    // duel::new_card(code) runs the card's initial_effect for non-vanilla
+    // codes, which creates and registers effects via Effect.CreateEffect
+    // + RegisterEffect. Those effects end up in duel.effects AND in the
+    // card's effect_containers. We're about to re-allocate effects from
+    // the saved EffectRecords (pass 3); without clearing the engine's
+    // initial_effect artifacts here, duel.effects ends up with both sets
+    // (saved + engine-created), corrupting round-trip determinism.
+    //
+    // Order matters: clear card.effect_containers BEFORE delete_effect
+    // (which only removes from duel.effects, not from any cards). After
+    // this pass, duel.effects is empty for the loaded cards' contributions.
     {
-        std::vector<card*> allocated_cards;
-        allocated_cards.reserve(state.cards_size());
-        for (const auto& cr : state.cards()) {
-            // Per chunk-5a save fail-loud, no card has effect refs set.
-            // Defensive double-check on load: if any card's effect_refs
-            // are non-empty we have a malformed blob.
-            if (cr.single_effect_size() != 0 || cr.field_effect_size() != 0 ||
-                cr.equip_effect_size() != 0 || cr.target_effect_size() != 0 ||
-                cr.xmaterial_effect_size() != 0) {
-                for (card* c : allocated_cards) d->delete_card(c);
-                delete d;
-                *load_error =
-                    "chunk-5a stub: card has non-empty effect_container "
-                    "refs; effect load is chunk-5b work";
-                return OCG_LOAD_ERR_INTERNAL;
-            }
-            // data_code is the canonical card identity passed to new_card
-            // (which calls cardReader to populate card.data). Falls back
-            // to current.code for blobs from older walks where data_code
-            // wasn't set.
-            const uint32_t code =
-                cr.data_code() != 0 ? cr.data_code() : cr.current().code();
-            card* c = d->new_card(code);
-            allocated_cards.push_back(c);
-            hc.register_handle(cr.handle(), c);
+        std::vector<effect*> to_delete;
+        for (card* c : allocated_cards) {
+            for (const auto& kv : c->single_effect)    to_delete.push_back(kv.second);
+            for (const auto& kv : c->field_effect)     to_delete.push_back(kv.second);
+            for (const auto& kv : c->equip_effect)     to_delete.push_back(kv.second);
+            for (const auto& kv : c->target_effect)    to_delete.push_back(kv.second);
+            for (const auto& kv : c->xmaterial_effect) to_delete.push_back(kv.second);
+            c->single_effect.clear();
+            c->field_effect.clear();
+            c->equip_effect.clear();
+            c->target_effect.clear();
+            c->xmaterial_effect.clear();
         }
-        // Second pass: now that all card pointers are registered, restore
-        // per-card fields including cross-refs (equip_target / etc.).
-        for (int i = 0; i < state.cards_size(); ++i) {
-            load_card_record(state.cards(i), allocated_cards[i], hc, he);
+        for (effect* e : to_delete) {
+            // delete_effect removes from duel.effects and frees memory.
+            // Note: a single effect might be referenced from multiple
+            // containers; dedup by tracking visits would be safer, but
+            // for chunk-5b vanilla-and-Type-C fixtures we don't have
+            // shared effects across cards.
+            d->delete_effect(e);
         }
     }
 
-    // Restore field-wide state. Order matters: this MUST come AFTER the
-    // new_card() loop above. Each new_card() bumps field.infos.card_id
-    // (via interpreter.cpp:101 in lua->register_card), so loading
-    // field_info before the card walk would have its card_id counter
-    // overwritten by the card walk's increments. Loading after means the
-    // counter ends up at the saved value, ready for any subsequent
-    // new_card() calls during Process.
+    // -----------------------------------------------------------------
+    // Pass 2: load card scalars + card-to-card cross-refs.
+    // -----------------------------------------------------------------
+    for (int i = 0; i < state.cards_size(); ++i) {
+        load_card_record(state.cards(i), allocated_cards[i], hc, he);
+    }
+
+    // -----------------------------------------------------------------
+    // Pass 3: allocate effects via duel::new_effect().
+    // -----------------------------------------------------------------
+    assert(static_cast<int>(hc.bound_count()) == state.cards_size() &&
+           "pass 3 invariant: all cards allocated");
+    std::vector<effect*> allocated_effects;
+    allocated_effects.reserve(state.effects_size());
+    for (const auto& er : state.effects()) {
+        effect* e = d->new_effect();
+        allocated_effects.push_back(e);
+        he.register_handle(er.handle(), e);
+    }
+
+    // -----------------------------------------------------------------
+    // Pass 4: load effect scalars + Lua callback restoration via
+    //         restore_lua_callback (plan §13.4).
+    // -----------------------------------------------------------------
+    assert(static_cast<int>(he.bound_count()) == state.effects_size() &&
+           "pass 4 invariant: all effects allocated");
+    lua_State* L = (d->lua != nullptr) ? d->lua->lua_state : nullptr;
+    for (int i = 0; i < state.effects_size(); ++i) {
+        const auto& src = state.effects(i);
+        effect* e = allocated_effects[i];
+        load_effect_record_scalars(src, e, hc);
+        if (L != nullptr) {
+            std::string err;
+            const struct {
+                const pb::LuaCallback& cb;
+                int32_t* slot;
+            } slots[] = {
+                {src.condition_callback(), &e->condition},
+                {src.cost_callback(),      &e->cost},
+                {src.target_callback(),    &e->target},
+                {src.value_callback(),     &e->value},
+                {src.operation_callback(), &e->operation},
+            };
+            for (const auto& s : slots) {
+                if (!restore_effect_callback(s.cb, s.slot, L, hc, he, hg, &err)) {
+                    delete d;
+                    *load_error = "Lua callback restore failed: " + err;
+                    return OCG_LOAD_ERR_MALFORMED;
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Pass 5: allocate groups + populate container from card_handles.
+    // -----------------------------------------------------------------
+    std::vector<group*> allocated_groups;
+    allocated_groups.reserve(state.groups_size());
+    for (const auto& gr : state.groups()) {
+        group* g = d->new_group();
+        allocated_groups.push_back(g);
+        hg.register_handle(gr.handle(), g);
+        load_group_record(gr, g, hc);
+    }
+
+    // -----------------------------------------------------------------
+    // Pass 6: third card pass — populate card.{single,field,equip,target,
+    //         xmaterial}_effect from saved EffectRefs.
+    // -----------------------------------------------------------------
+    assert(static_cast<int>(hc.bound_count()) == state.cards_size() &&
+           static_cast<int>(he.bound_count()) == state.effects_size() &&
+           "pass 6 invariant: cards + effects allocated");
+    for (int i = 0; i < state.cards_size(); ++i) {
+        load_card_effect_container_refs(state.cards(i), allocated_cards[i], he);
+    }
+
+    // -----------------------------------------------------------------
+    // Pass 7: load chain links (current_chain).
+    // -----------------------------------------------------------------
+    if (d->game_field != nullptr && state.has_chain()) {
+        d->game_field->core.current_chain.clear();
+        for (const auto& link_pb : state.chain().links()) {
+            d->game_field->core.current_chain.emplace_back();
+            load_chain_link(link_pb, &d->game_field->core.current_chain.back(),
+                            hc, he, hg);
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Pass 8: load field_info_post_card_walk. MUST follow card walk
+    //         (pass 1) — each new_card bumps field.infos.card_id.
+    // -----------------------------------------------------------------
     if (d->game_field != nullptr && state.has_field_info()) {
         load_field_info(state.field_info(), &d->game_field->infos);
     }
 
-    // Restore per-player scalars + zones. The HandleResolver is now
-    // populated; zone handles resolve cleanly to allocated cards.
+    // -----------------------------------------------------------------
+    // Pass 9: load player zones (zone vectors of card_handles).
+    // -----------------------------------------------------------------
     if (d->game_field != nullptr) {
         const int n = state.players_size();
         if (n != 2) {

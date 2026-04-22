@@ -20,6 +20,7 @@
 #include "duel.h"
 #include "field.h"
 #include "interpreter.h"
+#include "serialize/save_state.h"  // for direct refuse-reason inspection
 
 #include <algorithm>
 #include <cassert>
@@ -1085,6 +1086,229 @@ bool test_chunk5b_card_set_round_trip() {
 }
 
 // ---------------------------------------------------------------------------
+// CHUNK 5b Wave 3: Type-C fixture infrastructure
+//
+// Wave 1 + Wave 2 lifted fail-loud on cards/effects/groups/chain.links and
+// landed the bytecode-dump escape hatch. Wave 3 wires up real-card-script
+// fixtures to exercise the code paths.
+//
+// For Type-C closures we need:
+//   - cardReader returning real card metadata (type/level/attribute/race)
+//   - scriptReader loading actual .lua files from src/ygopro-scripts/
+// ---------------------------------------------------------------------------
+
+constexpr const char* kScriptsDir =
+    "/mnt/c/Users/Joe/Documents/ExodAI/src/ygopro-scripts";
+
+// Card data for Type-C fixtures. Same shape as the vanilla VanillaCard
+// table but with type-bits set to identify them as spells/traps where
+// relevant (Dueltaining is TYPE_SPELL+TYPE_FIELD).
+struct ScriptedCard {
+    uint32_t code;
+    uint32_t type;
+    uint32_t level;
+    uint32_t attribute;
+    uint64_t race;
+    int32_t attack;
+    int32_t defense;
+};
+
+constexpr ScriptedCard kScriptedCards[] = {
+    // Dueltaining — TYPE_SPELL (0x2) + TYPE_FIELD (0x80). Field Spell.
+    // Its initial_effect registers s.spcon(0), s.drop(0), s.btcon(0/1),
+    // s.chcon(0/1), s.damcon(0/1) — all integer-capture Type-C closures.
+    {19162134, 0x2 | 0x80, 0, 0, 0, 0, 0},
+
+    // c14220547 — Royal Magical Library or similar; uses
+    // s.condition(TYPE_RITUAL) / s.condition(TYPE_FUSION). Integer
+    // constant captures via Lua-evaluated TYPE_* globals.
+    // TYPE_SPELL + TYPE_QUICKPLAY (0x10000)? Look up in .lua header.
+    {14220547, 0x2 | 0x10000, 0, 0, 0, 0, 0},
+
+    // c30339825 — uses s.sptg(true) / s.sptg(false). Bool captures.
+    {30339825, 0x2 | 0x4, 0, 0, 0, 0, 0},  // Spell+Continuous (0x4) guess
+};
+
+void scripted_card_reader(void* /*payload*/, uint32_t code,
+                           OCG_CardData* data) {
+    if (data == nullptr) return;
+    std::memset(data, 0, sizeof(*data));
+    // Try scripted cards first.
+    for (const auto& v : kScriptedCards) {
+        if (v.code == code) {
+            data->code = v.code;
+            data->type = v.type;
+            data->level = v.level;
+            data->attribute = v.attribute;
+            data->race = v.race;
+            data->attack = v.attack;
+            data->defense = v.defense;
+            return;
+        }
+    }
+    // Fall through to vanilla cards.
+    for (const auto& v : kVanillaCards) {
+        if (v.code == code) {
+            data->code = v.code;
+            data->type = v.type;
+            data->level = v.level;
+            data->attribute = v.attribute;
+            data->race = v.race;
+            data->attack = v.attack;
+            data->defense = v.defense;
+            return;
+        }
+    }
+    // Unknown — leave zeroed.
+}
+
+// Loads a script file from the ProjectIgnis corpus on disk and feeds
+// it to the engine via OCG_LoadScript. Returns 1 on success, 0 if not
+// found or failed to read (the engine treats 0 as "no script", which
+// is fine for cards without per-card scripts).
+int scripted_script_reader(void* /*payload*/, OCG_Duel duel,
+                            const char* name) {
+    // name is like "./script/c19162134.lua"; strip the leading "./script/"
+    const char* basename = std::strrchr(name, '/');
+    basename = basename ? basename + 1 : name;
+    char path[512];
+    std::snprintf(path, sizeof(path), "%s/%s", kScriptsDir, basename);
+    std::FILE* fp = std::fopen(path, "rb");
+    if (fp == nullptr) return 0;
+    std::fseek(fp, 0, SEEK_END);
+    const long len = std::ftell(fp);
+    std::fseek(fp, 0, SEEK_SET);
+    if (len <= 0 || len > (1 << 20)) {
+        std::fclose(fp);
+        return 0;
+    }
+    std::vector<char> buf(static_cast<size_t>(len));
+    if (std::fread(buf.data(), 1, buf.size(), fp) != buf.size()) {
+        std::fclose(fp);
+        return 0;
+    }
+    std::fclose(fp);
+    return OCG_LoadScript(duel, buf.data(), static_cast<uint32_t>(buf.size()),
+                           name);
+}
+
+OCG_Duel make_scripted_duel(uint64_t seed_lo) {
+    OCG_DuelOptions opts{};
+    opts.seed[0] = seed_lo;
+    opts.seed[1] = 0xAA;
+    opts.seed[2] = 0xBB;
+    opts.seed[3] = 0xCC;
+    opts.team1 = OCG_Player{8000, 5, 1};
+    opts.team2 = OCG_Player{8000, 5, 1};
+    opts.cardReader = &scripted_card_reader;
+    opts.scriptReader = &scripted_script_reader;
+    opts.logHandler = &stub_log_handler;
+    opts.cardReaderDone = &stub_card_reader_done;
+    OCG_Duel duel = nullptr;
+    if (OCG_CreateDuel(&duel, &opts) != OCG_DUEL_CREATION_SUCCESS) {
+        return nullptr;
+    }
+    // Bootstrap the script library — same pattern as ygoenv's
+    // edopro.h:3687-3688. constant.lua + utility.lua provide the globals
+    // (TYPE_*, EFFECT_*, aux.*, etc.) that card scripts depend on.
+    scripted_script_reader(nullptr, duel, "constant.lua");
+    scripted_script_reader(nullptr, duel, "utility.lua");
+    return duel;
+}
+
+OCG_DuelOptions make_scripted_load_options() {
+    OCG_DuelOptions opts{};
+    opts.team1 = OCG_Player{8000, 5, 1};
+    opts.team2 = OCG_Player{8000, 5, 1};
+    opts.cardReader = &scripted_card_reader;
+    opts.scriptReader = &scripted_script_reader;
+    opts.logHandler = &stub_log_handler;
+    opts.cardReaderDone = &stub_card_reader_done;
+    return opts;
+}
+
+// ---------------------------------------------------------------------------
+// Type-C fixture #1: Dueltaining (c19162134) — genuine Type-C-as-callback,
+// integer captures via s.spcon(0) / s.drop(0) / s.btcon(0/1) / etc.
+// ---------------------------------------------------------------------------
+
+bool test_chunk5b_dueltaining_round_trip() {
+    OCG_Duel orig = make_scripted_duel(0x5BD1);
+    CHECK_TRUE(orig != nullptr, "create orig");
+
+    // Add Dueltaining as a card. Its initial_effect runs at new_card time
+    // (interpreter.cpp:94), registering ~10 effects with Type-C closures.
+    OCG_NewCardInfo info{};
+    info.team = 0;
+    info.duelist = 0;
+    info.code = 19162134;  // Dueltaining
+    info.con = 0;
+    info.loc = 0x10;       // LOCATION_SZONE
+    info.seq = 5;          // field-zone slot
+    info.pos = 0x05;       // POS_FACEUP_ATTACK
+    OCG_DuelNewCard(orig, &info);
+
+    auto* d_orig = static_cast<duel*>(orig);
+    const size_t effect_count = d_orig->effects.size();
+    CHECK_TRUE(effect_count > 0,
+               "Dueltaining initial_effect registered effects");
+    std::printf("  Dueltaining registered %zu effects\n", effect_count);
+
+    void* blob1 = nullptr;
+    uint32_t size1 = 0;
+    int s = OCG_DuelSaveState(orig, &blob1, &size1);
+    if (s != OCG_SAVE_OK) {
+        std::fprintf(stderr,
+            "FAIL: save returned status=%d on Dueltaining duel\n", s);
+        // Dump the engine's serialize_duel refuse_reason via a private
+        // hook — or, since the C API loses it, run save again into our
+        // own serialize_duel call where we can read the reason directly.
+        std::string reason;
+        ocg::serialize::serialize_duel(*static_cast<duel*>(orig),
+                                        nullptr ? nullptr : &reason,
+                                        &reason);
+        // Note: serialize_duel signature is (duel, out, refuse_reason);
+        // pass a string for both since out is required.
+        std::string out;
+        ocg::serialize::serialize_duel(*static_cast<duel*>(orig), &out, &reason);
+        std::fprintf(stderr, "  refuse_reason: %s\n", reason.c_str());
+        OCG_DestroyDuel(orig);
+        return false;
+    }
+
+    OCG_DuelOptions opts = make_scripted_load_options();
+    OCG_Duel loaded = nullptr;
+    int ls = OCG_DuelLoadState(blob1, size1, &opts, &loaded);
+    CHECK_EQ(ls, OCG_LOAD_OK, "load Dueltaining duel");
+
+    void* blob2 = nullptr;
+    uint32_t size2 = 0;
+    CHECK_EQ(OCG_DuelSaveState(loaded, &blob2, &size2), OCG_SAVE_OK,
+             "re-save after load");
+
+    CHECK_EQ(size1, size2, "round-trip sizes match");
+    if (std::memcmp(blob1, blob2, size1) != 0) {
+        const uint8_t* x = static_cast<const uint8_t*>(blob1);
+        const uint8_t* y = static_cast<const uint8_t*>(blob2);
+        for (uint32_t i = 0; i < size1; ++i) {
+            if (x[i] != y[i]) {
+                std::fprintf(stderr,
+                    "FAIL: Dueltaining round-trip byte %u differs: "
+                    "0x%02x vs 0x%02x (size=%u)\n", i, x[i], y[i], size1);
+                break;
+            }
+        }
+        OCG_FreeSaveBuffer(blob1); OCG_FreeSaveBuffer(blob2);
+        OCG_DestroyDuel(orig); OCG_DestroyDuel(loaded);
+        return false;
+    }
+
+    OCG_FreeSaveBuffer(blob1); OCG_FreeSaveBuffer(blob2);
+    OCG_DestroyDuel(orig); OCG_DestroyDuel(loaded);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // Free-buffer is safe on null
 // ---------------------------------------------------------------------------
 
@@ -1126,6 +1350,8 @@ int main() {
          &test_chunk5a_msg_stream_baseline_vs_load},
         // Chunk 5b Wave 1 — card_set fields for effect-targeting
         {"chunk5b_card_set_round_trip", &test_chunk5b_card_set_round_trip},
+        // Chunk 5b Wave 3 — Type-C fixtures
+        {"chunk5b_dueltaining_round_trip", &test_chunk5b_dueltaining_round_trip},
         // Chunk 4 perf scaffold (informational; not gated)
         {"perf_scaffold_vanilla", &test_perf_scaffold_vanilla},
     };

@@ -1,6 +1,7 @@
 #include "save_state.h"
 
 #include "handle_table.h"
+#include "lua_callback.h"
 #include "ocg_state.pb.h"
 #include "refuse_detect.h"
 
@@ -183,8 +184,15 @@ void write_card_record(const card& src, pb::CardRecord* dst,
     }
 }
 
-void write_effect_record(const effect& src, pb::EffectRecord* dst,
-                         HandleTable<card>& hc) {
+// Returns OCG_SAVE_OK on success, an error status on failure (with
+// refuse_reason filled). The Lua callback dumps may produce
+// OCG_SAVE_ERR_REFUSE_UNKNOWN_UPVALUE_TYPE per plan §13.4.
+OCG_SaveStatus write_effect_record(const effect& src, pb::EffectRecord* dst,
+                                    const duel& d,
+                                    HandleTable<card>& hc,
+                                    HandleTable<effect>& he,
+                                    HandleTable<group>& hg,
+                                    std::string* refuse_reason) {
     dst->set_count_limit(src.count_limit);
     dst->set_count_limit_max(src.count_limit_max);
     dst->set_count_flag(src.count_flag);
@@ -222,6 +230,31 @@ void write_effect_record(const effect& src, pb::EffectRecord* dst,
     dst->set_active_handler_card_handle(hc.assign(src.active_handler));
     dst->set_description(src.description);
     for (auto v : src.label) dst->add_label(static_cast<int64_t>(v));
+
+    // Chunk 5b Wave 2: Lua callback bytecode dump per plan §13.4.
+    // The owning card's konami id provides context for refuse reasons.
+    const uint32_t card_id = src.owner ? src.owner->data.code : 0;
+    lua_State* L = d.lua ? d.lua->lua_state : nullptr;
+    if (L == nullptr) {
+        // No Lua VM at all (defensive). All callback slots stay
+        // present=false. This is unusual but not an error.
+        return OCG_SAVE_OK;
+    }
+    struct Slot { int32_t ref; const char* name; pb::LuaCallback* out; };
+    Slot slots[] = {
+        {src.condition, "condition", dst->mutable_condition_callback()},
+        {src.cost,      "cost",      dst->mutable_cost_callback()},
+        {src.target,    "target",    dst->mutable_target_callback()},
+        {src.value,     "value",     dst->mutable_value_callback()},
+        {src.operation, "operation", dst->mutable_operation_callback()},
+    };
+    for (const auto& s : slots) {
+        const auto status = dump_lua_callback(L, s.ref, d, hc, he, hg,
+                                               card_id, s.name,
+                                               s.out, refuse_reason);
+        if (status != OCG_SAVE_OK) return status;
+    }
+    return OCG_SAVE_OK;
 }
 
 // Chain stack and processor-state writers are deliberately minimal in
@@ -325,34 +358,11 @@ OCG_SaveStatus serialize_duel(const duel& d, std::string* out,
             return OCG_SAVE_ERR_INTERNAL;
         }
     }
-    // Chunk 5a: refuse if effects or groups are non-empty. These are
-    // chunk-5b deliverables; chunk-5a vanilla fixtures (cards in zones,
-    // pre-StartDuel) have empty effect/group sets. Card.effect_container
-    // refs are written in write_card_record but the EffectRecord array
-    // itself stays empty; if a card has any effect ref, it points to a
-    // nonexistent handle, which load would correctly catch. Better to
-    // refuse here than emit broken cross-references.
-    {
-        bool any_card_has_effect = false;
-        for (card* c : d.cards) {
-            if (c == nullptr) continue;
-            if (!c->single_effect.empty() || !c->field_effect.empty() ||
-                !c->equip_effect.empty() || !c->target_effect.empty() ||
-                !c->xmaterial_effect.empty()) {
-                any_card_has_effect = true;
-                break;
-            }
-        }
-        if (!d.effects.empty() || !d.groups.empty() || any_card_has_effect) {
-            *refuse_reason =
-                "chunk-5a stub: card effects/groups walks are chunk-5b "
-                "work. This blob has registered effects, groups, or cards "
-                "with non-empty effect_containers. Chunk-5a vanilla "
-                "fixtures must be pre-StartDuel with vanilla (no-script) "
-                "cards only.";
-            return OCG_SAVE_ERR_INTERNAL;
-        }
-    }
+    // Chunk 5b Wave 2: effects, groups, card.effect_container refs, and
+    // chain links are all wired now. Lua callbacks dump per plan §13.4
+    // (with per-upvalue refuse for unknown types via plan §13.2 format).
+    // Only ProcessorState (units/subunits) and the pending-chain lists
+    // remain stubbed — those refuse above.
 
     // 2. Build handle tables in deterministic order.
     HandleTable<card> ht_cards;
@@ -472,7 +482,15 @@ OCG_SaveStatus serialize_duel(const duel& d, std::string* out,
     for (effect* e : ht_effects.in_handle_order()) {
         auto* er = state.add_effects();
         er->set_handle(ht_effects.assign(e));
-        write_effect_record(*e, er, ht_cards);
+        const auto eff_status = write_effect_record(*e, er, d, ht_cards,
+                                                     ht_effects, ht_groups,
+                                                     refuse_reason);
+        if (eff_status != OCG_SAVE_OK) {
+            // Lua dump can refuse with REFUSE_UNKNOWN_UPVALUE_TYPE per
+            // plan §13.4. Surface it directly; the refuse_reason already
+            // has the informative format from format_refuse_reason.
+            return eff_status;
+        }
     }
 
     for (group* g : ht_groups.in_handle_order()) {

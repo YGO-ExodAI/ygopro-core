@@ -37,8 +37,11 @@ typedef enum OCG_DuelStatus {
 typedef enum OCG_SaveStatus {
 	OCG_SAVE_OK = 0,
 	OCG_SAVE_ERR_NOT_MSG_BOUNDARY = 1,    /* save called mid-Process / inside Lua */
-	OCG_SAVE_ERR_REFUSE_UNSAFE_LUA = 2,   /* unknown Type-C closure (chunk 5+) */
-	OCG_SAVE_ERR_INTERNAL = 3
+	OCG_SAVE_ERR_REFUSE_UNSAFE_LUA = 2,   /* legacy: kept for ABI but superseded by below */
+	OCG_SAVE_ERR_INTERNAL = 3,
+	OCG_SAVE_ERR_REFUSE_UNKNOWN_UPVALUE_TYPE = 4  /* chunk 5b: per-upvalue refuse,
+	                                                 reason string carries lua type +
+	                                                 card+slot+upvalue_idx + value details */
 }OCG_SaveStatus;
 
 /* Reserved for chunk 4 (load). Defined here so consumers can compile
