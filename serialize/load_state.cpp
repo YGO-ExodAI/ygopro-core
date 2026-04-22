@@ -17,6 +17,9 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <chrono>      // chunk 10 LoadProfile
+#include <cstdio>      // chunk 10 LoadProfile
+#include <cstdlib>     // chunk 10 LoadProfile (getenv)
 #include <new>
 #include <variant>
 #include <vector>
@@ -453,10 +456,31 @@ void load_chain_link(const pb::ChainLink& src, chain* dst,
 
 }  // namespace
 
+// Chunk 10/8a: env-gated load-path profiler. Enable via
+// EXODAI_LOAD_PROFILE=1 (or any non-empty value). Emits per-pass wall
+// time to stderr in a CSV-friendly line. No-op (one getenv read) when
+// disabled.
+namespace {
+struct LoadProfile {
+    bool enabled;
+    std::chrono::steady_clock::time_point t_prev;
+    LoadProfile() : enabled(std::getenv("EXODAI_LOAD_PROFILE") != nullptr),
+                    t_prev(std::chrono::steady_clock::now()) {}
+    void mark(const char* phase) {
+        if (!enabled) return;
+        auto now = std::chrono::steady_clock::now();
+        double us = std::chrono::duration<double, std::micro>(now - t_prev).count();
+        std::fprintf(stderr, "LOAD_PROFILE %s %.3f us\n", phase, us);
+        t_prev = now;
+    }
+};
+}  // namespace
+
 OCG_LoadStatus deserialize_duel(const void* buffer, std::size_t size,
                                 const OCG_DuelOptions& options,
                                 duel** out_duel,
                                 std::string* load_error) {
+    LoadProfile prof;
     load_error->clear();
 
     // Strict output-empty contract per plan §3.1.
@@ -480,6 +504,7 @@ OCG_LoadStatus deserialize_duel(const void* buffer, std::size_t size,
         *load_error = "protobuf ParseFromArray failed";
         return OCG_LOAD_ERR_MALFORMED;
     }
+    prof.mark("proto_parse");
 
     if (state.schema_version() != kSchemaVersion) {
         *load_error =
@@ -502,6 +527,7 @@ OCG_LoadStatus deserialize_duel(const void* buffer, std::size_t size,
         *load_error = "duel allocation failed";
         return OCG_LOAD_ERR_INTERNAL;
     }
+    prof.mark("duel_ctor");
 
     // Restore RNG state (must follow construction; ctor seeds from options).
     if (state.rng().xoshiro_state_size() != 4) {
@@ -549,6 +575,8 @@ OCG_LoadStatus deserialize_duel(const void* buffer, std::size_t size,
     }
     (void)new_card_count;  // suppress unused-warning when asserts are off
 
+    prof.mark("pass1_alloc_cards");
+
     // -----------------------------------------------------------------
     // Pass 1.5: clear engine-created initial_effect artifacts.
     //
@@ -587,12 +615,16 @@ OCG_LoadStatus deserialize_duel(const void* buffer, std::size_t size,
         }
     }
 
+    prof.mark("pass1.5_clear_artifacts");
+
     // -----------------------------------------------------------------
     // Pass 2: load card scalars + card-to-card cross-refs.
     // -----------------------------------------------------------------
     for (int i = 0; i < state.cards_size(); ++i) {
         load_card_record(state.cards(i), allocated_cards[i], hc, he);
     }
+
+    prof.mark("pass2_card_scalars");
 
     // -----------------------------------------------------------------
     // Pass 3: allocate effects via duel::new_effect().
@@ -606,6 +638,8 @@ OCG_LoadStatus deserialize_duel(const void* buffer, std::size_t size,
         allocated_effects.push_back(e);
         he.register_handle(er.handle(), e);
     }
+
+    prof.mark("pass3_alloc_effects");
 
     // -----------------------------------------------------------------
     // Pass 4: load effect scalars + Lua callback restoration via
@@ -650,6 +684,8 @@ OCG_LoadStatus deserialize_duel(const void* buffer, std::size_t size,
         }
     }
 
+    prof.mark("pass4_lua_callbacks");
+
     // -----------------------------------------------------------------
     // Pass 5: allocate groups + populate container from card_handles.
     // -----------------------------------------------------------------
@@ -661,6 +697,8 @@ OCG_LoadStatus deserialize_duel(const void* buffer, std::size_t size,
         hg.register_handle(gr.handle(), g);
         load_group_record(gr, g, hc);
     }
+
+    prof.mark("pass5_groups");
 
     // -----------------------------------------------------------------
     // Pass 6: third card pass — populate card.{single,field,equip,target,
@@ -727,6 +765,8 @@ OCG_LoadStatus deserialize_duel(const void* buffer, std::size_t size,
             return OCG_LOAD_ERR_MALFORMED;
         }
     }
+
+    prof.mark("pass6-10_post_lua");
 
     *out_duel = d;
     return OCG_LOAD_OK;

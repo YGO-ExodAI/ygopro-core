@@ -1235,6 +1235,15 @@ constexpr ScriptedCard kScriptedCards[] = {
     // from the §15 measurement's 10-card SelfToGrave class. Crystal Beast
     // archetype concentration per the user's fixture-selection note.
     {18847598, kTypeMonster | kTypeEffect, 4, 0x10 /*ATTR_EARTH*/, 0, 1000, 1800},
+
+    // §8.7 Type-C #1: Forbidden Dark Contract with the Swamp King (c10833828)
+    // — Continuous Spell. Chunk 9b §8.7 regression fixture (3rd Type-C
+    // closure example, completes the three originally specified).
+    {10833828, kTypeSpell | kTypeContinuous, 0, 0, 0, 0, 0},
+
+    // §8.7 Type-C #3: Darklord Eveningstar (c10136446) — Effect/Fusion
+    // Monster. Chunk 9b §8.7 regression fixture.
+    {10136446, kTypeMonster | kTypeEffect, 7, 0x4 /*ATTR_DARK*/, 0, 2800, 2000},
 };
 
 void scripted_card_reader(void* /*payload*/, uint32_t code,
@@ -1630,6 +1639,36 @@ bool test_chunk9a_tier2_self_to_grave_round_trip() {
 }
 
 // ---------------------------------------------------------------------------
+// §8.7 regression matrix — Type-C closure fixtures (partial).
+//
+// The §8.7 plan calls for 3 specific Type-C card fixtures as named
+// regression tests: Forbidden Dark Contract (c10833828), Dueltaining
+// (c19162134), Darklord Eveningstar (c10136446). Dueltaining is
+// already covered by chunk5b_dueltaining_round_trip; these two fill
+// out the set.
+//
+// The remaining §8.7 cases (mid-chain, activation window, post-control-
+// swap, Xyz materials, continuous effect on field, pending deck
+// search, token on field, nonzero counters, equipment chain) all
+// require multi-step scripted setup beyond the single-card-add
+// pattern. Deferred to morning or later work — per user guidance,
+// partial suite is better than no suite; flaky is worse than absent.
+// ---------------------------------------------------------------------------
+bool test_chunk9b_forbidden_dark_contract_round_trip() {
+    constexpr uint32_t LOC_SZONE = 0x8;
+    constexpr uint32_t POS_FACEUP_ATK = 0x1;
+    return scripted_round_trip("§8.7_forbidden_dark_contract", 10833828,
+                               LOC_SZONE, /*seq=*/0, POS_FACEUP_ATK, 0x87C1);
+}
+
+bool test_chunk9b_darklord_eveningstar_round_trip() {
+    constexpr uint32_t LOC_HAND = 0x2;
+    constexpr uint32_t POS_FACEUP_ATK = 0x1;
+    return scripted_round_trip("§8.7_darklord_eveningstar", 10136446,
+                               LOC_HAND, /*seq=*/0, POS_FACEUP_ATK, 0x87C3);
+}
+
+// ---------------------------------------------------------------------------
 // MSG-stream verification helper for Type-C fixtures.
 //
 // Sequence:
@@ -1777,6 +1816,11 @@ int main() {
          &test_chunk9a_tier2_self_destroy_round_trip},
         {"chunk9a_tier2_self_to_grave_round_trip",
          &test_chunk9a_tier2_self_to_grave_round_trip},
+        // Chunk 9b §8.7 Type-C regression fixtures (partial matrix)
+        {"chunk9b_forbidden_dark_contract_round_trip",
+         &test_chunk9b_forbidden_dark_contract_round_trip},
+        {"chunk9b_darklord_eveningstar_round_trip",
+         &test_chunk9b_darklord_eveningstar_round_trip},
         // Chunk 5b Wave 1 — card_set fields for effect-targeting
         {"chunk5b_card_set_round_trip", &test_chunk5b_card_set_round_trip},
         // Chunk 5b Wave 3 — Type-C fixtures (byte-equal round-trip)
