@@ -45,6 +45,11 @@ public:
 	using result_type = ResultType;
 	static constexpr ResultType min() noexcept { return ResultType(0U); }
 	static constexpr ResultType max() noexcept { return ResultType(~ResultType(0U)); }
+
+	// ExodAI Phase P1 Primitive 1: state accessor for serialization.
+	// Returns the four 64-bit Xoshiro state words (deck shuffle, coin
+	// flip, dice, effect RNG all draw from this single stream).
+	constexpr const StateType& get_state() const noexcept { return s; }
 private:
 	StateType s;
 

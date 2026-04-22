@@ -31,6 +31,28 @@ typedef enum OCG_DuelStatus {
 	OCG_DUEL_STATUS_CONTINUE
 }OCG_DuelStatus;
 
+/* ExodAI Phase P1 Primitive 1: state serialization (chunk 3).
+ * Status returned from OCG_DuelSaveState. See
+ * src/docs/phase_p1_primitive_1_plan.md §3.1. */
+typedef enum OCG_SaveStatus {
+	OCG_SAVE_OK = 0,
+	OCG_SAVE_ERR_NOT_MSG_BOUNDARY = 1,    /* save called mid-Process / inside Lua */
+	OCG_SAVE_ERR_REFUSE_UNSAFE_LUA = 2,   /* unknown Type-C closure (chunk 5+) */
+	OCG_SAVE_ERR_INTERNAL = 3
+}OCG_SaveStatus;
+
+/* Reserved for chunk 4 (load). Defined here so consumers can compile
+ * against the full enum even before OCG_DuelLoadState lands. */
+typedef enum OCG_LoadStatus {
+	OCG_LOAD_OK = 0,
+	OCG_LOAD_ERR_MALFORMED = 1,
+	OCG_LOAD_ERR_SCHEMA_VERSION = 2,
+	OCG_LOAD_ERR_CORPUS_MISMATCH = 3,
+	OCG_LOAD_ERR_REFUSE_TAG = 4,
+	OCG_LOAD_ERR_OUTPUT_NOT_EMPTY = 5,    /* *out_ocg_duel was non-null on entry */
+	OCG_LOAD_ERR_INTERNAL = 6
+}OCG_LoadStatus;
+
 typedef void* OCG_Duel;
 
 typedef struct OCG_CardData {

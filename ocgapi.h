@@ -45,4 +45,26 @@ OCGAPI void* OCG_DuelQuery(OCG_Duel ocg_duel, uint32_t* length, const OCG_QueryI
 OCGAPI void* OCG_DuelQueryLocation(OCG_Duel ocg_duel, uint32_t* length, const OCG_QueryInfo* info_ptr);
 OCGAPI void* OCG_DuelQueryField(OCG_Duel ocg_duel, uint32_t* length);
 
+/*** STATE SERIALIZATION — ExodAI Phase P1 Primitive 1 ***
+ *
+ * See src/docs/phase_p1_primitive_1_plan.md §3.1 for the full design.
+ *
+ * Save-time invariant: must be called at an MSG boundary
+ * (post-OCG_DuelProcess + post-OCG_DuelGetMessage drain, pre-next
+ * OCG_DuelSetResponse). Calling mid-Process or from inside a Lua
+ * callback returns OCG_SAVE_ERR_NOT_MSG_BOUNDARY without producing
+ * a buffer.
+ *
+ * Returns OCG_SaveStatus (cast as int for ABI). On OCG_SAVE_OK,
+ * *buffer is allocated and *size set; caller must free via
+ * OCG_FreeSaveBuffer. On any error, *buffer is set to NULL and
+ * *size to 0.
+ *
+ * Chunk 3 status: implementation captures the C++ duel/field/cards/
+ * effects/groups/chain/processor/RNG tree. Lua reconstruction (closure
+ * args for Type-C scripts) is left empty pending chunk 5.
+ */
+OCGAPI int OCG_DuelSaveState(OCG_Duel ocg_duel, void** buffer, uint32_t* size);
+OCGAPI void OCG_FreeSaveBuffer(void* buffer);
+
 #endif /* OCGAPI_H */

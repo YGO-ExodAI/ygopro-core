@@ -115,6 +115,12 @@ public:
 	inline int read_script(const char* name) {
 		return read_script_callback(read_script_payload, this, name);
 	}
+
+	// ExodAI Phase P1 Primitive 1 (chunk 3): RNG state accessor for
+	// serialization. The Xoshiro state is the only piece of randomness
+	// in the engine (deck shuffle, coin flip, dice, effect RNG all draw
+	// from this single stream); the serializer captures it as 4×uint64.
+	const RNG::Xoshiro256StarStar& get_rng() const { return random; }
 private:
 	std::deque<duel_message> messages;
 	RNG::Xoshiro256StarStar random;

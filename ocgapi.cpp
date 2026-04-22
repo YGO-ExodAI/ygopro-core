@@ -4,14 +4,17 @@
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
+#include <cstdlib> //std::malloc / std::free for save buffer
 #include <cstring> //std::memcpy
 #include <new> //std::nothrow
+#include <string> //std::string for state serialization
 #include <vector>
 #include "ocgapi.h"
 #include "interpreter.h"
 #include "duel.h"
 #include "field.h"
 #include "effect.h"
+#include "serialize/save_state.h"  // ExodAI Phase P1 Primitive 1 (chunk 3)
 
 OCGAPI void OCG_GetVersion(int* major, int* minor) {
 	if(major)
@@ -291,4 +294,52 @@ OCGAPI void* OCG_DuelQueryField(OCG_Duel ocg_duel, uint32_t* length) {
 	if(length)
 		*length = static_cast<uint32_t>(query.size());
 	return query.data();
+}
+
+// =============================================================================
+// ExodAI Phase P1 Primitive 1 (chunk 3): state serialization C API.
+// Implementation lives in serialize/save_state.cpp; this is the thin
+// allocator wrapper that copies the std::string output into a malloc'd
+// buffer so the caller can free via OCG_FreeSaveBuffer regardless of
+// which allocator the caller uses.
+// =============================================================================
+
+OCGAPI int OCG_DuelSaveState(OCG_Duel ocg_duel, void** buffer, uint32_t* size) {
+	if(buffer == nullptr || size == nullptr) {
+		// Match the OCG_DUEL_CREATION_NO_OUTPUT pattern: callers passing
+		// null pointers don't get a chance to leak memory.
+		return OCG_SAVE_ERR_INTERNAL;
+	}
+	*buffer = nullptr;
+	*size = 0;
+	if(ocg_duel == nullptr) {
+		return OCG_SAVE_ERR_INTERNAL;
+	}
+	auto* pduel = static_cast<duel*>(ocg_duel);
+	std::string serialized;
+	std::string refuse_reason;
+	const auto status = ocg::serialize::serialize_duel(*pduel, &serialized, &refuse_reason);
+	if(status != OCG_SAVE_OK) {
+		// refuse_reason is collected here for future log-handler callbacks
+		// (chunk 7 Python layer reads it via a paired inspect API). Chunk
+		// 3 just surfaces the status code.
+		return static_cast<int>(status);
+	}
+	if(serialized.empty()) {
+		// Defensive: a successful serialize with empty output would leave
+		// callers with a buffer they can't distinguish from an unset one.
+		return OCG_SAVE_ERR_INTERNAL;
+	}
+	void* buf = std::malloc(serialized.size());
+	if(buf == nullptr) {
+		return OCG_SAVE_ERR_INTERNAL;
+	}
+	std::memcpy(buf, serialized.data(), serialized.size());
+	*buffer = buf;
+	*size = static_cast<uint32_t>(serialized.size());
+	return OCG_SAVE_OK;
+}
+
+OCGAPI void OCG_FreeSaveBuffer(void* buffer) {
+	std::free(buffer);
 }
