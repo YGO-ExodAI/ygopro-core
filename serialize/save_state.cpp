@@ -265,14 +265,48 @@ OCG_SaveStatus serialize_duel(const duel& d, std::string* out,
         }
     }
 
+    // 1b. Fail-loud on chunks-3/4 stubs (per chunk-4 user decision: option 1
+    // "fail-loud is cheaper than remembering"). The processor and pending-
+    // chain writers are no-ops; if the state is non-empty we'd silently
+    // drop it. Refuse with a clear reason so the first non-vanilla fixture
+    // that hits this errors instead of silently corrupting state.
+    //
+    // current_chain (the active chain stack) IS handled by chunk 3's
+    // write_chain_link, so it's not in this check. The list below is
+    // exactly the set of subtrees still stubbed in save_state.cpp's
+    // write_chain / write_processor.
+    if (d.game_field) {
+        const auto& core = d.game_field->core;
+        if (!core.units.empty() || !core.subunits.empty() ||
+            !core.tpchain.empty() || !core.ntpchain.empty() ||
+            !core.select_chains.empty()) {
+            *refuse_reason =
+                "chunk-3/4 stub: ProcessorState (units/subunits) and "
+                "pending-chain lists (tpchain/ntpchain/select_chains) are "
+                "not yet wired into the save path; chunk 5 lands them. "
+                "First non-vanilla fixture that hits this should drive the "
+                "implementation work.";
+            return OCG_SAVE_ERR_INTERNAL;
+        }
+    }
+
     // 2. Build handle tables in deterministic order.
     HandleTable<card> ht_cards;
     HandleTable<effect> ht_effects;
     HandleTable<group> ht_groups;
 
+    // Skip the engine's internal scratch slot (field.temp_card) — it's
+    // an implementation detail of the field constructor, not user state.
+    // Including it would create a cross-side load problem: the freshly-
+    // constructed duel on the load side already has its own temp_card
+    // pointer, and the saved CardRecord can't be bound to that engine-
+    // managed slot without reaching into field internals.
+    card* const temp_card = (d.game_field != nullptr) ? d.game_field->temp_card
+                                                       : nullptr;
+
     auto assign_zone = [&](const card_vector& zone) {
         for (card* c : zone) {
-            if (c) ht_cards.assign(c);
+            if (c && c != temp_card) ht_cards.assign(c);
         }
     };
 
@@ -295,7 +329,9 @@ OCG_SaveStatus serialize_duel(const duel& d, std::string* out,
         std::vector<card*> orphans;
         orphans.reserve(d.cards.size());
         for (card* c : d.cards) {
-            if (c && !ht_cards.contains(c)) orphans.push_back(c);
+            if (c && c != temp_card && !ht_cards.contains(c)) {
+                orphans.push_back(c);
+            }
         }
         std::sort(orphans.begin(), orphans.end(),
                   [](card* a, card* b) { return a->cardid < b->cardid; });

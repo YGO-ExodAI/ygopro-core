@@ -62,9 +62,37 @@ OCGAPI void* OCG_DuelQueryField(OCG_Duel ocg_duel, uint32_t* length);
  *
  * Chunk 3 status: implementation captures the C++ duel/field/cards/
  * effects/groups/chain/processor/RNG tree. Lua reconstruction (closure
- * args for Type-C scripts) is left empty pending chunk 5.
+ * args for Type-C scripts) is left empty pending chunk 5. Save also
+ * fail-loud-refuses with OCG_SAVE_ERR_INTERNAL when chunk-4 stubs
+ * (ProcessorState, tpchain/ntpchain/select_chains) would otherwise
+ * silently drop state.
  */
 OCGAPI int OCG_DuelSaveState(OCG_Duel ocg_duel, void** buffer, uint32_t* size);
 OCGAPI void OCG_FreeSaveBuffer(void* buffer);
+
+/* OCG_DuelLoadState — chunk-4 amendment to plan §3.1.
+ *
+ * Allocates a fresh duel from a serialized blob. options_ptr supplies
+ * the callbacks (cardReader / scriptReader / logHandler) that the
+ * loaded duel will reach back through; saved state OVERRIDES any seed
+ * / starting-LP / draw-count fields in the options.
+ *
+ * Strict output-empty contract: *out_ocg_duel must be NULL on entry.
+ * Non-null returns OCG_LOAD_ERR_OUTPUT_NOT_EMPTY without touching
+ * either the existing duel or the input buffer. Caller is responsible
+ * for OCG_DestroyDuel'ing any prior duel and resetting the pointer
+ * before invoking load.
+ *
+ * Returns OCG_LoadStatus cast to int. On OCG_LOAD_OK, *out_ocg_duel
+ * owns a fresh heap-allocated duel; release via OCG_DestroyDuel.
+ *
+ * Chunk 4 status: vanilla blobs (no cards / effects / groups / chain /
+ * lua) round-trip cleanly. Blobs from future chunks (carrying the above)
+ * fail-loud-refuse with OCG_LOAD_ERR_INTERNAL because chunk-4 walks
+ * don't restore those subtrees yet.
+ */
+OCGAPI int OCG_DuelLoadState(const void* buffer, uint32_t size,
+                             const OCG_DuelOptions* options_ptr,
+                             OCG_Duel* out_ocg_duel);
 
 #endif /* OCGAPI_H */

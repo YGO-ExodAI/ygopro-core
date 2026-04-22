@@ -13,19 +13,24 @@
 #include "ocgapi.h"
 #include "ocgapi_types.h"
 
-// Internal headers — required only for the NOT_MSG_BOUNDARY synthesis
-// test below, which pokes interpreter::call_depth directly to simulate
-// "save called inside a Lua call" without needing to actually run a
-// Process loop. Static-lib linkage makes the symbols visible.
+// Internal headers — required for the NOT_MSG_BOUNDARY synthesis test
+// (pokes interpreter::call_depth directly) and for the chunk-4 load
+// tests that mutate field_info / player[] on the duel before saving.
+// Static-lib linkage makes the symbols visible to the test binary.
 #include "duel.h"
+#include "field.h"
 #include "interpreter.h"
 
+#include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <tuple>
+#include <vector>
 
 namespace {
 
@@ -303,6 +308,387 @@ bool test_refuse_not_msg_boundary() {
 }
 
 // ---------------------------------------------------------------------------
+// CHUNK 4: Load + round-trip tests
+// ---------------------------------------------------------------------------
+
+// Builds OCG_DuelOptions identical to make_vanilla_duel's, so a load can
+// reuse the same callbacks the original duel had. Saved state overrides
+// the seed at deserialization, so the seed_lo argument here is irrelevant
+// for behavior — but we pass a deliberately-different value to confirm
+// the saved RNG wins over the options seed.
+OCG_DuelOptions make_load_options(uint64_t seed_lo) {
+    OCG_DuelOptions opts{};
+    opts.seed[0] = seed_lo;
+    opts.seed[1] = 0xDEADC0DEDEADC0DEULL;
+    opts.seed[2] = 0xC0FFEEC0FFEE0000ULL;
+    opts.seed[3] = 0x0123456789ABCDEFULL;
+    opts.flags = 0;
+    opts.team1 = OCG_Player{8000, 5, 1};
+    opts.team2 = OCG_Player{8000, 5, 1};
+    opts.cardReader = &stub_card_reader;
+    opts.scriptReader = &stub_script_reader;
+    opts.logHandler = &stub_log_handler;
+    opts.cardReaderDone = &stub_card_reader_done;
+    return opts;
+}
+
+bool test_load_round_trip_byte_equal() {
+    // Save → load → save → assert byte-equal across the two saves.
+    // This is the strongest chunk-4 invariant: the load path preserves
+    // every bit of state the save path captured. With vanilla fixtures
+    // (no cards), the second save must produce exactly the same bytes
+    // as the first.
+    OCG_Duel orig = make_vanilla_duel(0xABCD1234ABCD1234ULL);
+    CHECK_TRUE(orig != nullptr, "create orig");
+
+    void* blob1 = nullptr;
+    uint32_t size1 = 0;
+    CHECK_EQ(OCG_DuelSaveState(orig, &blob1, &size1), OCG_SAVE_OK,
+             "save orig");
+
+    OCG_Duel loaded = nullptr;
+    OCG_DuelOptions opts = make_load_options(0xCAFE);  // seed deliberately
+                                                       // different from orig
+    int load_status = OCG_DuelLoadState(blob1, size1, &opts, &loaded);
+    CHECK_EQ(load_status, OCG_LOAD_OK, "load");
+    CHECK_TRUE(loaded != nullptr, "load produced a duel");
+
+    void* blob2 = nullptr;
+    uint32_t size2 = 0;
+    CHECK_EQ(OCG_DuelSaveState(loaded, &blob2, &size2), OCG_SAVE_OK,
+             "save loaded");
+
+    CHECK_EQ(size1, size2, "save sizes match");
+    if (std::memcmp(blob1, blob2, size1) != 0) {
+        const uint8_t* a = static_cast<const uint8_t*>(blob1);
+        const uint8_t* b = static_cast<const uint8_t*>(blob2);
+        for (uint32_t i = 0; i < size1; ++i) {
+            if (a[i] != b[i]) {
+                std::fprintf(stderr,
+                    "FAIL: round-trip byte %u differs: 0x%02x vs 0x%02x\n",
+                    i, a[i], b[i]);
+                break;
+            }
+        }
+        OCG_FreeSaveBuffer(blob1);
+        OCG_FreeSaveBuffer(blob2);
+        OCG_DestroyDuel(orig);
+        OCG_DestroyDuel(loaded);
+        return false;
+    }
+
+    OCG_FreeSaveBuffer(blob1);
+    OCG_FreeSaveBuffer(blob2);
+    OCG_DestroyDuel(orig);
+    OCG_DestroyDuel(loaded);
+    return true;
+}
+
+bool test_load_preserves_rng_state() {
+    // Save captures RNG state; load restores it. After load, the duel's
+    // RNG must produce the same future values as the original would have.
+    // We probe via duel::get_rng().get_state() (no Process needed).
+    OCG_Duel orig = make_vanilla_duel(0x7777EEEE7777EEEEULL);
+    CHECK_TRUE(orig != nullptr, "create orig");
+
+    auto* d_orig = static_cast<duel*>(orig);
+    const auto orig_state = d_orig->get_rng().get_state();
+
+    void* blob = nullptr;
+    uint32_t size = 0;
+    CHECK_EQ(OCG_DuelSaveState(orig, &blob, &size), OCG_SAVE_OK, "save");
+
+    OCG_Duel loaded = nullptr;
+    OCG_DuelOptions opts = make_load_options(0x9999);  // different seed
+    CHECK_EQ(OCG_DuelLoadState(blob, size, &opts, &loaded), OCG_LOAD_OK,
+             "load");
+    auto* d_loaded = static_cast<duel*>(loaded);
+    const auto loaded_state = d_loaded->get_rng().get_state();
+
+    CHECK_EQ(orig_state[0], loaded_state[0], "rng[0]");
+    CHECK_EQ(orig_state[1], loaded_state[1], "rng[1]");
+    CHECK_EQ(orig_state[2], loaded_state[2], "rng[2]");
+    CHECK_EQ(orig_state[3], loaded_state[3], "rng[3]");
+
+    OCG_FreeSaveBuffer(blob);
+    OCG_DestroyDuel(orig);
+    OCG_DestroyDuel(loaded);
+    return true;
+}
+
+bool test_load_preserves_field_info() {
+    OCG_Duel orig = make_vanilla_duel(1);
+    CHECK_TRUE(orig != nullptr, "create orig");
+
+    // Mutate a few field_info fields so we can verify they came back
+    // through. (Vanilla post-CreateDuel has defaults; mutate to detect
+    // load really restoring rather than just inheriting from ctor.)
+    auto* d_orig = static_cast<duel*>(orig);
+    d_orig->game_field->infos.turn_id = 17;
+    d_orig->game_field->infos.phase = 0x40;
+    d_orig->game_field->infos.turn_player = 1;
+    d_orig->game_field->infos.event_id = 999;
+
+    void* blob = nullptr;
+    uint32_t size = 0;
+    CHECK_EQ(OCG_DuelSaveState(orig, &blob, &size), OCG_SAVE_OK, "save");
+
+    OCG_Duel loaded = nullptr;
+    OCG_DuelOptions opts = make_load_options(2);
+    CHECK_EQ(OCG_DuelLoadState(blob, size, &opts, &loaded), OCG_LOAD_OK,
+             "load");
+    auto* d_loaded = static_cast<duel*>(loaded);
+    CHECK_EQ(d_loaded->game_field->infos.turn_id, 17, "turn_id");
+    CHECK_EQ(d_loaded->game_field->infos.phase, 0x40, "phase");
+    CHECK_EQ(d_loaded->game_field->infos.turn_player, 1, "turn_player");
+    CHECK_EQ(d_loaded->game_field->infos.event_id, 999u, "event_id");
+
+    OCG_FreeSaveBuffer(blob);
+    OCG_DestroyDuel(orig);
+    OCG_DestroyDuel(loaded);
+    return true;
+}
+
+bool test_load_preserves_player_lp() {
+    OCG_Duel orig = make_vanilla_duel(1);
+    CHECK_TRUE(orig != nullptr, "create orig");
+
+    auto* d_orig = static_cast<duel*>(orig);
+    d_orig->game_field->player[0].lp = 4321;
+    d_orig->game_field->player[1].lp = 1234;
+    d_orig->game_field->player[0].used_location = 0xCAFE;
+
+    void* blob = nullptr;
+    uint32_t size = 0;
+    CHECK_EQ(OCG_DuelSaveState(orig, &blob, &size), OCG_SAVE_OK, "save");
+
+    OCG_Duel loaded = nullptr;
+    OCG_DuelOptions opts = make_load_options(2);
+    CHECK_EQ(OCG_DuelLoadState(blob, size, &opts, &loaded), OCG_LOAD_OK,
+             "load");
+    auto* d_loaded = static_cast<duel*>(loaded);
+    CHECK_EQ(d_loaded->game_field->player[0].lp, 4321, "p0 lp");
+    CHECK_EQ(d_loaded->game_field->player[1].lp, 1234, "p1 lp");
+    CHECK_EQ(d_loaded->game_field->player[0].used_location, 0xCAFEu,
+             "p0 used_location");
+
+    OCG_FreeSaveBuffer(blob);
+    OCG_DestroyDuel(orig);
+    OCG_DestroyDuel(loaded);
+    return true;
+}
+
+bool test_load_strict_output_not_empty() {
+    // Plan §3.1: *out must be nullptr on entry. Non-null returns
+    // OCG_LOAD_ERR_OUTPUT_NOT_EMPTY without touching either pointer.
+    OCG_Duel orig = make_vanilla_duel(1);
+    CHECK_TRUE(orig != nullptr, "create orig");
+    void* blob = nullptr;
+    uint32_t size = 0;
+    CHECK_EQ(OCG_DuelSaveState(orig, &blob, &size), OCG_SAVE_OK, "save");
+
+    // Pretend the caller forgot to null out_duel.
+    OCG_Duel out = orig;  // non-null
+    OCG_DuelOptions opts = make_load_options(1);
+    CHECK_EQ(OCG_DuelLoadState(blob, size, &opts, &out),
+             OCG_LOAD_ERR_OUTPUT_NOT_EMPTY,
+             "non-null *out_duel rejected");
+    CHECK_TRUE(out == orig, "out untouched on rejection");
+
+    OCG_FreeSaveBuffer(blob);
+    OCG_DestroyDuel(orig);
+    return true;
+}
+
+bool test_load_malformed_blob() {
+    OCG_DuelOptions opts = make_load_options(1);
+
+    // Random garbage bytes
+    const uint8_t garbage[16] = {0xDE, 0xAD, 0xBE, 0xEF, 0xC0, 0xFF, 0xEE, 0x00,
+                                  0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88};
+    OCG_Duel out = nullptr;
+    int s = OCG_DuelLoadState(garbage, sizeof(garbage), &opts, &out);
+    CHECK_EQ(s, OCG_LOAD_ERR_MALFORMED, "garbage rejected");
+    CHECK_TRUE(out == nullptr, "no duel allocated");
+
+    // Empty buffer
+    out = nullptr;
+    CHECK_EQ(OCG_DuelLoadState(nullptr, 0, &opts, &out),
+             OCG_LOAD_ERR_MALFORMED, "null buffer rejected");
+    CHECK_EQ(OCG_DuelLoadState(garbage, 0, &opts, &out),
+             OCG_LOAD_ERR_MALFORMED, "zero size rejected");
+
+    return true;
+}
+
+bool test_load_wrong_schema_version() {
+    // Build a syntactically-valid blob with schema_version = 999.
+    ocg::state::DuelState s;
+    s.set_schema_version(999);
+    auto* rng = s.mutable_rng();
+    for (int i = 0; i < 4; ++i) rng->add_xoshiro_state(0);
+    s.add_players()->set_lp(8000);
+    s.add_players()->set_lp(8000);
+    s.mutable_field_info();
+    std::string bytes;
+    CHECK_TRUE(s.SerializeToString(&bytes), "serialize bad-version blob");
+
+    OCG_DuelOptions opts = make_load_options(1);
+    OCG_Duel out = nullptr;
+    int status = OCG_DuelLoadState(bytes.data(),
+                                   static_cast<uint32_t>(bytes.size()),
+                                   &opts, &out);
+    CHECK_EQ(status, OCG_LOAD_ERR_SCHEMA_VERSION,
+             "schema version 999 rejected");
+    CHECK_TRUE(out == nullptr, "no duel allocated");
+    return true;
+}
+
+bool test_load_refuse_tag() {
+    // Build a syntactically-valid blob tagged save_safety=REFUSE.
+    ocg::state::DuelState s;
+    s.set_schema_version(1);
+    s.set_save_safety(ocg::state::DuelState::SAVE_SAFETY_REFUSE);
+    s.set_refuse_reason("test fixture");
+    auto* rng = s.mutable_rng();
+    for (int i = 0; i < 4; ++i) rng->add_xoshiro_state(0);
+    s.add_players()->set_lp(8000);
+    s.add_players()->set_lp(8000);
+    s.mutable_field_info();
+    std::string bytes;
+    CHECK_TRUE(s.SerializeToString(&bytes), "serialize refuse-tagged blob");
+
+    OCG_DuelOptions opts = make_load_options(1);
+    OCG_Duel out = nullptr;
+    int status = OCG_DuelLoadState(bytes.data(),
+                                   static_cast<uint32_t>(bytes.size()),
+                                   &opts, &out);
+    CHECK_EQ(status, OCG_LOAD_ERR_REFUSE_TAG,
+             "refuse-tagged blob rejected");
+    CHECK_TRUE(out == nullptr, "no duel allocated");
+    return true;
+}
+
+bool test_load_null_options_rejected() {
+    OCG_Duel orig = make_vanilla_duel(1);
+    void* blob = nullptr;
+    uint32_t size = 0;
+    CHECK_EQ(OCG_DuelSaveState(orig, &blob, &size), OCG_SAVE_OK, "save");
+
+    OCG_Duel out = nullptr;
+    int status = OCG_DuelLoadState(blob, size, nullptr, &out);
+    CHECK_EQ(status, OCG_LOAD_ERR_INTERNAL, "null options rejected");
+    CHECK_TRUE(out == nullptr, "no duel allocated");
+
+    OCG_FreeSaveBuffer(blob);
+    OCG_DestroyDuel(orig);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Perf scaffold (chunk 4) — vanilla fixtures only.
+//
+// Per phase_p1_primitive_1_plan.md §9 the real perf harness is chunk 10
+// work (full sample-state suite, p95/p99, cold-vs-warm cache split). This
+// is a "ballpark" check at chunk 4: if vanilla save/load is anywhere near
+// the §9.2 budgets (save <5ms p95, load <50ms p95), we're on track for
+// the real benchmark; if it's already over budget on the empty fixture,
+// we should investigate now.
+// ---------------------------------------------------------------------------
+
+bool test_perf_scaffold_vanilla() {
+    constexpr int kIterations = 100;
+    std::vector<double> save_ms;
+    std::vector<double> load_ms;
+    save_ms.reserve(kIterations);
+    load_ms.reserve(kIterations);
+
+    OCG_Duel orig = make_vanilla_duel(0xCA11AB1ECA11AB1EULL);
+    CHECK_TRUE(orig != nullptr, "create orig");
+
+    // Pre-roll one save to warm the protobuf init paths so the first
+    // measurement isn't an outlier.
+    {
+        void* warm_buf = nullptr;
+        uint32_t warm_size = 0;
+        OCG_DuelSaveState(orig, &warm_buf, &warm_size);
+        OCG_FreeSaveBuffer(warm_buf);
+    }
+
+    void* blob = nullptr;
+    uint32_t blob_size = 0;
+
+    for (int i = 0; i < kIterations; ++i) {
+        const auto t0 = std::chrono::high_resolution_clock::now();
+        void* buf = nullptr;
+        uint32_t size = 0;
+        const int s = OCG_DuelSaveState(orig, &buf, &size);
+        const auto t1 = std::chrono::high_resolution_clock::now();
+        if (s != OCG_SAVE_OK) {
+            std::fprintf(stderr, "perf: save failed at iter %d\n", i);
+            return false;
+        }
+        save_ms.push_back(
+            std::chrono::duration<double, std::milli>(t1 - t0).count());
+        if (i == 0) {
+            blob = buf;
+            blob_size = size;
+        } else {
+            OCG_FreeSaveBuffer(buf);
+        }
+    }
+
+    OCG_DuelOptions opts = make_load_options(1);
+    for (int i = 0; i < kIterations; ++i) {
+        OCG_Duel out = nullptr;
+        const auto t0 = std::chrono::high_resolution_clock::now();
+        const int s = OCG_DuelLoadState(blob, blob_size, &opts, &out);
+        const auto t1 = std::chrono::high_resolution_clock::now();
+        if (s != OCG_LOAD_OK || out == nullptr) {
+            std::fprintf(stderr, "perf: load failed at iter %d\n", i);
+            return false;
+        }
+        load_ms.push_back(
+            std::chrono::duration<double, std::milli>(t1 - t0).count());
+        OCG_DestroyDuel(out);
+    }
+
+    auto stats = [](std::vector<double> v) {
+        std::sort(v.begin(), v.end());
+        const double median = v[v.size() / 2];
+        const double p95 = v[static_cast<size_t>(v.size() * 0.95)];
+        const double p99 = v[static_cast<size_t>(v.size() * 0.99)];
+        const double minv = v.front();
+        const double maxv = v.back();
+        return std::tuple<double, double, double, double, double>{
+            minv, median, p95, p99, maxv};
+    };
+
+    auto [s_min, s_med, s_p95, s_p99, s_max] = stats(save_ms);
+    auto [l_min, l_med, l_p95, l_p99, l_max] = stats(load_ms);
+
+    std::printf(
+        "  perf (vanilla, n=%d, blob=%u bytes):\n"
+        "    save: min=%.3f med=%.3f p95=%.3f p99=%.3f max=%.3f ms\n"
+        "    load: min=%.3f med=%.3f p95=%.3f p99=%.3f max=%.3f ms\n"
+        "    budgets (plan §9.2): save p95 < 5ms, load p95 < 50ms\n"
+        "    save p95 budget: %s\n"
+        "    load p95 budget: %s\n",
+        kIterations, blob_size,
+        s_min, s_med, s_p95, s_p99, s_max,
+        l_min, l_med, l_p95, l_p99, l_max,
+        s_p95 < 5.0 ? "OK" : "OVER",
+        l_p95 < 50.0 ? "OK" : "OVER");
+
+    OCG_FreeSaveBuffer(blob);
+    OCG_DestroyDuel(orig);
+
+    // Don't fail the test on budget miss at chunk 4 — perf is a real
+    // gate at chunk 10. This is a ballpark signal for the status report.
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // Free-buffer is safe on null
 // ---------------------------------------------------------------------------
 
@@ -321,12 +707,25 @@ int main() {
         const char* name;
         bool (*fn)();
     } tests[] = {
+        // Chunk 3
         {"byte_equal_intra_path", &test_byte_equal_intra_path},
         {"blob_parses_with_expected_shape", &test_blob_parses_with_expected_shape},
         {"refuse_null_pointer_args", &test_refuse_null_pointer_args},
         {"distinct_seeds_yield_distinct_blobs", &test_distinct_seeds_yield_distinct_blobs},
         {"refuse_not_msg_boundary", &test_refuse_not_msg_boundary},
         {"free_null_is_safe", &test_free_null_is_safe},
+        // Chunk 4 (load + round-trip)
+        {"load_round_trip_byte_equal", &test_load_round_trip_byte_equal},
+        {"load_preserves_rng_state", &test_load_preserves_rng_state},
+        {"load_preserves_field_info", &test_load_preserves_field_info},
+        {"load_preserves_player_lp", &test_load_preserves_player_lp},
+        {"load_strict_output_not_empty", &test_load_strict_output_not_empty},
+        {"load_malformed_blob", &test_load_malformed_blob},
+        {"load_wrong_schema_version", &test_load_wrong_schema_version},
+        {"load_refuse_tag", &test_load_refuse_tag},
+        {"load_null_options_rejected", &test_load_null_options_rejected},
+        // Chunk 4 perf scaffold (informational; not gated)
+        {"perf_scaffold_vanilla", &test_perf_scaffold_vanilla},
     };
 
     for (const auto& t : tests) {

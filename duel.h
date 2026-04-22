@@ -121,6 +121,14 @@ public:
 	// in the engine (deck shuffle, coin flip, dice, effect RNG all draw
 	// from this single stream); the serializer captures it as 4×uint64.
 	const RNG::Xoshiro256StarStar& get_rng() const { return random; }
+
+	// ExodAI Phase P1 Primitive 1 (chunk 4): RNG state setter for the
+	// load path. Replaces the current Xoshiro state with the saved state
+	// during deserialization. Caller is responsible for ensuring the
+	// duel is in a well-defined state otherwise.
+	void set_rng_state(const RNG::Xoshiro256StarStar::StateType& s) {
+		random = RNG::Xoshiro256StarStar(s);
+	}
 private:
 	std::deque<duel_message> messages;
 	RNG::Xoshiro256StarStar random;

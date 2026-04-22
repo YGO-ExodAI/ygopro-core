@@ -15,6 +15,7 @@
 #include "field.h"
 #include "effect.h"
 #include "serialize/save_state.h"  // ExodAI Phase P1 Primitive 1 (chunk 3)
+#include "serialize/load_state.h"  // ExodAI Phase P1 Primitive 1 (chunk 4)
 
 OCGAPI void OCG_GetVersion(int* major, int* minor) {
 	if(major)
@@ -342,4 +343,51 @@ OCGAPI int OCG_DuelSaveState(OCG_Duel ocg_duel, void** buffer, uint32_t* size) {
 
 OCGAPI void OCG_FreeSaveBuffer(void* buffer) {
 	std::free(buffer);
+}
+
+OCGAPI int OCG_DuelLoadState(const void* buffer, uint32_t size,
+                              const OCG_DuelOptions* options_ptr,
+                              OCG_Duel* out_ocg_duel) {
+	if(out_ocg_duel == nullptr) {
+		return OCG_LOAD_ERR_INTERNAL;
+	}
+	if(*out_ocg_duel != nullptr) {
+		// Strict output-empty contract per plan §3.1. Don't touch
+		// either the prior duel or the input buffer.
+		return OCG_LOAD_ERR_OUTPUT_NOT_EMPTY;
+	}
+	if(options_ptr == nullptr) {
+		// Caller must supply the OCG_DuelOptions that the loaded duel
+		// will use for cardReader / scriptReader / logHandler callbacks.
+		// Saved state overrides seed and starting LP from these options.
+		return OCG_LOAD_ERR_INTERNAL;
+	}
+	auto options = *options_ptr;
+	// Mirror OCG_CreateDuel's null-callback defaults so loaded duels
+	// reach the same well-defined state as freshly-created ones.
+	if(options.cardReader == nullptr) {
+		return OCG_LOAD_ERR_INTERNAL;
+	}
+	if(options.scriptReader == nullptr) {
+		return OCG_LOAD_ERR_INTERNAL;
+	}
+	if(options.logHandler == nullptr) {
+		options.logHandler = [](void* /*payload*/, const char* /*string*/, int /*type*/) {};
+		options.payload3 = nullptr;
+	}
+	if(options.cardReaderDone == nullptr) {
+		options.cardReaderDone = [](void* /*payload*/, OCG_CardData* /*data*/) {};
+		options.payload4 = nullptr;
+	}
+	duel* d = nullptr;
+	std::string load_error;
+	const auto status = ocg::serialize::deserialize_duel(
+	    buffer, size, options, &d, &load_error);
+	if(status != OCG_LOAD_OK) {
+		// load_error stays in the deserialize_duel-local string for now;
+		// chunk 7 Python layer surfaces it via a paired inspect API.
+		return static_cast<int>(status);
+	}
+	*out_ocg_duel = static_cast<OCG_Duel>(d);
+	return OCG_LOAD_OK;
 }
