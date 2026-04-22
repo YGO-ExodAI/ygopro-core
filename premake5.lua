@@ -10,7 +10,16 @@ local ocgcore_config=function()
 	-- treats them as project sources even before the first build has run
 	-- protoc. Fresh checkouts on Linux/mac builds (if we ever enable them)
 	-- would either need `make proto` first or an analogous prebuild hook.
+	-- Chunk 8: serialize/*.cpp (save_state, load_state, lua_callback,
+	-- refuse_detect, bytecode_cache) added so EDOPro's ocgcore.lib
+	-- contains the OCG_DuelSaveState/OCG_DuelLoadState implementation
+	-- bodies. Pre-Chunk-8 the vcxproj only had the proto-generated
+	-- files, so the C API entry points were declared but unimplemented
+	-- for the EDOPro client side. ygoenv's xmake build path was
+	-- unaffected (its own xmake.lua includes serialize/*.cpp).
 	files { "*.h", "*.hpp", "*.cpp", "RNG/*.hpp", "RNG/*.cpp",
+		"serialize/*.h",
+		"serialize/*.cpp",
 		"serialize/ocg_state.proto",
 		"serialize/ocg_state.pb.h",
 		"serialize/ocg_state.pb.cc" }
