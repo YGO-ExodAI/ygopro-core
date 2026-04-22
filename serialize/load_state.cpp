@@ -235,17 +235,20 @@ void load_effect_record_scalars(const pb::EffectRecord& src, effect* dst,
 // Restore the Lua callback bytecode + upvalues for an effect's slot.
 // Returns true on success, false if the saved callback was malformed
 // (load_error filled).
+//
+// Chunk 5c: takes a LuaLoadContext (per-card scoped). The context's
+// table_handle_to_lua_ref carries previously-materialized tables so
+// table_ref CapturedArgs resolve to the same Lua table instance — the
+// load-side mirror of save's per-card table registry.
 bool restore_effect_callback(const pb::LuaCallback& src, int32_t* dst_ref,
                               lua_State* L,
-                              HandleResolver<card>& hc,
-                              HandleResolver<effect>& he,
-                              HandleResolver<group>& hg,
+                              LuaLoadContext& ctx,
                               std::string* load_error) {
     if (!src.present()) {
         *dst_ref = 0;
         return true;
     }
-    *dst_ref = restore_lua_callback(L, src, hc, he, hg, load_error);
+    *dst_ref = restore_lua_callback(L, src, ctx, load_error);
     if (*dst_ref == 0 && !load_error->empty()) {
         return false;
     }
@@ -477,10 +480,20 @@ OCG_LoadStatus deserialize_duel(const void* buffer, std::size_t size,
     assert(static_cast<int>(he.bound_count()) == state.effects_size() &&
            "pass 4 invariant: all effects allocated");
     lua_State* L = (d->lua != nullptr) ? d->lua->lua_state : nullptr;
+    // Chunk 5c: per-card LuaLoadContext mirrors the save-side per-card
+    // registry. Reset between owners so table_ref handles resolve within
+    // the correct scope. Owner-change detection works because save-side
+    // emits effects in the same card-grouped order.
+    LuaLoadContext lua_ctx{hc, he, hg, {}, 0};
+    card* prev_owner = nullptr;
     for (int i = 0; i < state.effects_size(); ++i) {
         const auto& src = state.effects(i);
         effect* e = allocated_effects[i];
         load_effect_record_scalars(src, e, hc);
+        if (e->owner != prev_owner) {
+            lua_ctx.reset_per_card();
+            prev_owner = e->owner;
+        }
         if (L != nullptr) {
             std::string err;
             const struct {
@@ -494,7 +507,7 @@ OCG_LoadStatus deserialize_duel(const void* buffer, std::size_t size,
                 {src.operation_callback(), &e->operation},
             };
             for (const auto& s : slots) {
-                if (!restore_effect_callback(s.cb, s.slot, L, hc, he, hg, &err)) {
+                if (!restore_effect_callback(s.cb, s.slot, L, lua_ctx, &err)) {
                     delete d;
                     *load_error = "Lua callback restore failed: " + err;
                     return OCG_LOAD_ERR_MALFORMED;

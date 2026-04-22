@@ -203,10 +203,11 @@ static uint32_t hc_assign_safe(HandleTable<card>& hc, card* ptr) {
 
 OCG_SaveStatus write_effect_record(const effect& src, pb::EffectRecord* dst,
                                     const duel& d,
-                                    HandleTable<card>& hc,
-                                    HandleTable<effect>& he,
-                                    HandleTable<group>& hg,
+                                    LuaSaveContext& lua_ctx,
                                     std::string* refuse_reason) {
+    HandleTable<card>& hc = lua_ctx.hc;
+    HandleTable<effect>& he = lua_ctx.he;
+    HandleTable<group>& hg = lua_ctx.hg;
     dst->set_count_limit(src.count_limit);
     dst->set_count_limit_max(src.count_limit_max);
     dst->set_count_flag(src.count_flag);
@@ -266,7 +267,7 @@ OCG_SaveStatus write_effect_record(const effect& src, pb::EffectRecord* dst,
         {src.operation, "operation", dst->mutable_operation_callback()},
     };
     for (const auto& s : slots) {
-        const auto status = dump_lua_callback(L, s.ref, d, hc, he, hg,
+        const auto status = dump_lua_callback(L, s.ref, d, lua_ctx,
                                                card_id, s.name,
                                                s.out, refuse_reason);
         if (status != OCG_SAVE_OK) return status;
@@ -496,11 +497,23 @@ OCG_SaveStatus serialize_duel(const duel& d, std::string* out,
         write_card_record(*c, cr, ht_cards, ht_effects);
     }
 
+    // Chunk 5c: thread a LuaSaveContext through write_effect_record. The
+    // context carries the per-card table-pointer registry that preserves
+    // intra-card table-upvalue identity (5c.0 measured 22.5% sharing
+    // incidence). Reset between owners. Effects from one card are
+    // contiguous in handle order (the assignment loop above walks
+    // card-by-card), so owner-change detection is sufficient to scope
+    // the registry correctly.
+    LuaSaveContext lua_ctx{ht_cards, ht_effects, ht_groups, {}, 1, 6, 0};
+    card* prev_owner = nullptr;
     for (effect* e : ht_effects.in_handle_order()) {
+        if (e && e->owner != prev_owner) {
+            lua_ctx.reset_per_card();
+            prev_owner = e->owner;
+        }
         auto* er = state.add_effects();
         er->set_handle(ht_effects.assign(e));
-        const auto eff_status = write_effect_record(*e, er, d, ht_cards,
-                                                     ht_effects, ht_groups,
+        const auto eff_status = write_effect_record(*e, er, d, lua_ctx,
                                                      refuse_reason);
         if (eff_status != OCG_SAVE_OK) {
             // Lua dump can refuse with REFUSE_UNKNOWN_UPVALUE_TYPE per

@@ -20,6 +20,7 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 class duel;
@@ -39,7 +40,7 @@ template <typename T> class HandleTable;
 template <typename T> class HandleResolver;
 
 // ---------------------------------------------------------------------------
-// Classifier output for an upvalue (plan §13.1)
+// Classifier output for an upvalue (plan §13.1; chunk 5c extension)
 // ---------------------------------------------------------------------------
 
 enum class UpvalueKind {
@@ -51,8 +52,68 @@ enum class UpvalueKind {
     CARD,         // engine card userdata (membership-set confirmed)
     EFFECT,       // engine effect userdata
     GROUP,        // engine group userdata
-    UNKNOWN,      // anything else: table, function, thread, userdata of
-                  // unknown shape, lightuserdata, etc.
+    LUA_FUNCTION, // chunk 5c: dumpable Lua function (lua_dump-able)
+    TABLE,        // chunk 5c: table (recursively walked)
+    UNKNOWN,      // anything else: C function, thread, userdata of
+                  // unknown shape, lightuserdata, large table, etc.
+};
+
+// ---------------------------------------------------------------------------
+// Per-card save/load context (chunk 5c).
+//
+// Threads handle tables PLUS a per-card table-pointer registry through
+// the recursive dump/restore path. The table registry preserves
+// intra-card table identity: when the same lua_topointer appears as an
+// upvalue of multiple closures within a single card, the second+ sighting
+// emits CapturedArg.table_ref(handle) rather than a duplicate TableDef.
+//
+// Per-card scope means cross-card sharing is NOT preserved by this
+// mechanism. The chunk-5c cross-card test fixture surfaces whether
+// cross-card sharing is prevalent enough in the corpus to warrant a
+// duel-wide registry. If the cross-card test fails, that's a known
+// finding to report — not a 5c implementation bug.
+// ---------------------------------------------------------------------------
+
+struct LuaSaveContext {
+    HandleTable<card>& hc;
+    HandleTable<effect>& he;
+    HandleTable<group>& hg;
+
+    // Table-pointer registry. Cleared between cards via reset_per_card().
+    std::unordered_map<const void*, uint32_t> table_registry;
+    uint32_t next_table_handle = 1;
+
+    // Recursion depth guard. 5c.0 measured max 8 inner-function-count;
+    // we cap at 6 to match the observed tail with one level of margin.
+    int max_depth = 6;
+    int current_depth = 0;
+
+    void reset_per_card() {
+        table_registry.clear();
+        next_table_handle = 1;
+        current_depth = 0;
+    }
+};
+
+struct LuaLoadContext {
+    HandleResolver<card>& hc;
+    HandleResolver<effect>& he;
+    HandleResolver<group>& hg;
+
+    // handle → Lua registry ref. The Lua state owns the table; we hold
+    // a registry ref that prevents GC. Cleared between cards via
+    // reset_per_card() — the Lua refs become unreferenced and collectible.
+    std::unordered_map<uint32_t, int> table_handle_to_lua_ref;
+
+    int current_depth = 0;
+
+    void reset_per_card() {
+        // We don't luaL_unref here — the GC will reclaim once nothing
+        // else references the tables. Cleanup at duel-destruction time
+        // happens via lua_close.
+        table_handle_to_lua_ref.clear();
+        current_depth = 0;
+    }
 };
 
 // Classify the value at stack index `idx` per plan §13.1's membership-set
@@ -78,9 +139,7 @@ UpvalueKind classify_upvalue(lua_State* L, int idx, const duel& d);
 // upvalue patterns without re-instrumentation (per plan §13.2).
 // ---------------------------------------------------------------------------
 OCG_SaveStatus dump_lua_callback(lua_State* L, int32_t lua_ref, const duel& d,
-                                  HandleTable<card>& hc,
-                                  HandleTable<effect>& he,
-                                  HandleTable<group>& hg,
+                                  LuaSaveContext& ctx,
                                   uint32_t card_konami_id,
                                   const char* slot_name,
                                   ocg::state::LuaCallback* out,
@@ -97,9 +156,7 @@ OCG_SaveStatus dump_lua_callback(lua_State* L, int32_t lua_ref, const duel& d,
 // ---------------------------------------------------------------------------
 int32_t restore_lua_callback(lua_State* L,
                              const ocg::state::LuaCallback& saved,
-                             HandleResolver<card>& hc,
-                             HandleResolver<effect>& he,
-                             HandleResolver<group>& hg,
+                             LuaLoadContext& ctx,
                              std::string* load_error);
 
 }  // namespace ocg::serialize

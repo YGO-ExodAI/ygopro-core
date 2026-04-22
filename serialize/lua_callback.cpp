@@ -24,6 +24,38 @@ namespace ocg::serialize {
 namespace {
 
 // ---------------------------------------------------------------------------
+// Forward decls (chunk 5c — recursive dump/restore)
+// ---------------------------------------------------------------------------
+
+// Captures one upvalue value at stack idx into `out`. Returns OK or refuses;
+// recursive for function/table values. For UNKNOWN the caller fills
+// refuse_reason and returns the appropriate status.
+OCG_SaveStatus capture_value_recursive(lua_State* L, int idx, const duel& d,
+                                        LuaSaveContext& ctx,
+                                        uint32_t card_konami_id,
+                                        const char* slot_name,
+                                        int upvalue_idx,
+                                        ocg::state::CapturedArg* out,
+                                        std::string* refuse_reason);
+
+OCG_SaveStatus dump_function_recursive(lua_State* L, int fn_idx, const duel& d,
+                                        LuaSaveContext& ctx,
+                                        uint32_t card_konami_id,
+                                        const char* slot_name,
+                                        ocg::state::LuaCallback* out,
+                                        std::string* refuse_reason);
+
+bool restore_value_recursive(lua_State* L,
+                              const ocg::state::CapturedArg& arg,
+                              LuaLoadContext& ctx,
+                              std::string* load_error);
+
+int32_t restore_function_recursive(lua_State* L,
+                                    const ocg::state::LuaCallback& saved,
+                                    LuaLoadContext& ctx,
+                                    std::string* load_error);
+
+// ---------------------------------------------------------------------------
 // Plan §13.1: membership-set classifier. Engine handles are detected by
 // reading the userdata payload as a pointer and checking against the duel's
 // existing membership tables. No metatable enumeration.
@@ -37,9 +69,6 @@ UpvalueKind classify_userdata(lua_State* L, int idx, const duel& d) {
     lua_obj* obj = *static_cast<lua_obj**>(payload);
     if (obj == nullptr) return UpvalueKind::UNKNOWN;
 
-    // Pointer-equality membership lookups. We never dereference `obj` until
-    // confirmed in one of the engine's own sets (eliminates the false-
-    // positive risk per plan §13.1).
     if (d.cards.find(static_cast<card*>(obj)) != d.cards.end()) {
         return UpvalueKind::CARD;
     }
@@ -61,15 +90,18 @@ UpvalueKind classify_userdata(lua_State* L, int idx, const duel& d) {
 // ---------------------------------------------------------------------------
 
 constexpr size_t kRefuseReasonMaxLen = 256;
+// Chunk 5c: a "small" table for recursive walk. Above this size we refuse
+// (the script is doing something we don't have a sized fixture for).
+constexpr int kMaxTableKeysToWalk = 64;
 
 std::string format_refuse_reason(lua_State* L, int idx,
                                   uint32_t card_konami_id,
                                   const char* slot_name,
-                                  int upvalue_idx) {
+                                  int upvalue_idx,
+                                  const char* extra = nullptr) {
     char buf[kRefuseReasonMaxLen];
     const char* type_name = lua_typename(L, lua_type(L, idx));
 
-    // Prefix shared by all types
     char prefix[160];
     std::snprintf(prefix, sizeof(prefix),
                   "upvalue type=%s at card=%u slot=%s upvalue_idx=%d; ",
@@ -104,7 +136,6 @@ std::string format_refuse_reason(lua_State* L, int idx,
             const size_t shown = len < 32 ? len : 32;
             std::memcpy(preview, s, shown);
             preview[shown] = '\0';
-            // Replace non-printable for safety
             for (size_t i = 0; i < shown; ++i) {
                 if (preview[i] < 32 || preview[i] == 127) preview[i] = '?';
             }
@@ -114,7 +145,6 @@ std::string format_refuse_reason(lua_State* L, int idx,
             break;
         }
         case LUA_TTABLE: {
-            // Walk first 8 entries, list key/value type names
             char keytypes[80];
             char valtypes[80];
             keytypes[0] = '\0';
@@ -138,7 +168,7 @@ std::string format_refuse_reason(lua_State* L, int idx,
                                  sizeof(valtypes) - std::strlen(valtypes) - 1);
                     ++count;
                 }
-                lua_pop(L, 1);  // remove value, keep key for next iteration
+                lua_pop(L, 1);
             }
             if (total > count) {
                 std::snprintf(details, sizeof(details),
@@ -152,14 +182,13 @@ std::string format_refuse_reason(lua_State* L, int idx,
             break;
         }
         case LUA_TUSERDATA: {
-            // Try to read __name metafield (Lua 5.3+)
             const char* name = "(none)";
             if (lua_getmetatable(L, idx)) {
                 lua_getfield(L, -1, "__name");
                 if (lua_isstring(L, -1)) {
                     name = lua_tostring(L, -1);
                 }
-                lua_pop(L, 2);  // pop __name + metatable
+                lua_pop(L, 2);
             }
             std::snprintf(details, sizeof(details),
                           "userdata size=%zu __name=%s",
@@ -167,18 +196,26 @@ std::string format_refuse_reason(lua_State* L, int idx,
             break;
         }
         case LUA_TFUNCTION: {
-            // Try lua_getinfo to get source + line
-            lua_pushvalue(L, idx);
-            lua_Debug ar;
-            std::memset(&ar, 0, sizeof(ar));
-            if (lua_getinfo(L, ">S", &ar)) {
+            // Distinguish Lua vs C function for the refuse path. Chunk-5c
+            // does NOT support C functions (no bytecode); they continue to
+            // refuse with a detailed reason.
+            const bool is_c = lua_iscfunction(L, idx) != 0;
+            if (is_c) {
                 std::snprintf(details, sizeof(details),
-                              "function source=%s line=%d",
-                              ar.short_src ? ar.short_src : "?",
-                              ar.linedefined);
+                              "function (C function — no bytecode dump path)");
             } else {
-                std::snprintf(details, sizeof(details),
-                              "function (lua_getinfo failed)");
+                lua_pushvalue(L, idx);
+                lua_Debug ar;
+                std::memset(&ar, 0, sizeof(ar));
+                if (lua_getinfo(L, ">S", &ar)) {
+                    std::snprintf(details, sizeof(details),
+                                  "function source=%s line=%d",
+                                  ar.short_src ? ar.short_src : "?",
+                                  ar.linedefined);
+                } else {
+                    std::snprintf(details, sizeof(details),
+                                  "function (lua_getinfo failed)");
+                }
             }
             break;
         }
@@ -195,73 +232,335 @@ std::string format_refuse_reason(lua_State* L, int idx,
             break;
     }
 
-    std::snprintf(buf, sizeof(buf), "%s%s", prefix, details);
-    return std::string(buf);
-}
-
-// ---------------------------------------------------------------------------
-// Read the value at stack index `idx` and write to `out` as a CapturedArg
-// (per plan §13.4). Caller has already classified the upvalue and confirmed
-// it's a known type. For unknown types, caller calls format_refuse_reason
-// instead.
-// ---------------------------------------------------------------------------
-
-bool capture_known_upvalue(lua_State* L, int idx, UpvalueKind kind,
-                            HandleTable<card>& hc,
-                            HandleTable<effect>& he,
-                            HandleTable<group>& hg,
-                            ocg::state::CapturedArg* out) {
-    switch (kind) {
-        case UpvalueKind::NIL:
-            // We treat nil upvalues as "no value" — captured int 0 as a
-            // placeholder. (Per plan §13.2, nil is typically refused, but
-            // since the audit didn't see nil captures we can also accept
-            // them as int 0 to be more permissive.)
-            out->set_i(0);
-            return true;
-        case UpvalueKind::BOOLEAN:
-            out->set_b(lua_toboolean(L, idx) != 0);
-            return true;
-        case UpvalueKind::INTEGER:
-            out->set_i(lua_tointeger(L, idx));
-            return true;
-        case UpvalueKind::NUMBER:
-            out->set_d(lua_tonumber(L, idx));
-            return true;
-        case UpvalueKind::STRING: {
-            size_t len = 0;
-            const char* s = lua_tolstring(L, idx, &len);
-            out->set_s(s, len);
-            return true;
-        }
-        case UpvalueKind::CARD: {
-            void* payload = lua_touserdata(L, idx);
-            card* obj = *static_cast<card**>(payload);
-            out->set_card_handle(hc.assign(obj));
-            return true;
-        }
-        case UpvalueKind::EFFECT: {
-            void* payload = lua_touserdata(L, idx);
-            effect* obj = *static_cast<effect**>(payload);
-            out->set_effect_handle(he.assign(obj));
-            return true;
-        }
-        case UpvalueKind::GROUP: {
-            void* payload = lua_touserdata(L, idx);
-            group* obj = *static_cast<group**>(payload);
-            out->set_group_handle(hg.assign(obj));
-            return true;
-        }
-        case UpvalueKind::UNKNOWN:
-            return false;
+    if (extra && *extra) {
+        std::snprintf(buf, sizeof(buf), "%s%s; %s", prefix, details, extra);
+    } else {
+        std::snprintf(buf, sizeof(buf), "%s%s", prefix, details);
     }
-    return false;
+    return std::string(buf);
 }
 
 // lua_dump writer callback — appends bytes to the std::string in `ud`.
 int dump_writer(lua_State* /*L*/, const void* p, size_t sz, void* ud) {
     static_cast<std::string*>(ud)->append(static_cast<const char*>(p), sz);
     return 0;
+}
+
+// Detects the canonical `local s,id=GetID()` pattern: is this upvalue
+// the script's own _G["c<owning_card_code>"] table?
+uint32_t detect_script_self_table(lua_State* L, int idx,
+                                   uint32_t owning_card_code) {
+    if (owning_card_code == 0) return 0;
+    if (lua_type(L, idx) != LUA_TTABLE) return 0;
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "c%u", owning_card_code);
+    lua_getglobal(L, buf);
+    if (lua_isnil(L, -1)) { lua_pop(L, 1); return 0; }
+    const int normalized = idx > 0 ? idx : idx - 1;
+    const bool same = lua_rawequal(L, normalized, -1) != 0;
+    lua_pop(L, 1);
+    return same ? owning_card_code : 0;
+}
+
+// ---------------------------------------------------------------------------
+// Chunk 5c: dump a table at stack idx into a TableDef (or table_ref if
+// the same pointer was already emitted in this card's save scope).
+// ---------------------------------------------------------------------------
+
+OCG_SaveStatus dump_table(lua_State* L, int idx, const duel& d,
+                           LuaSaveContext& ctx,
+                           uint32_t card_konami_id,
+                           const char* slot_name,
+                           int upvalue_idx,
+                           ocg::state::CapturedArg* out,
+                           std::string* refuse_reason) {
+    const void* tbl_ptr = lua_topointer(L, idx);
+
+    // Sharing check: if this pointer has been emitted in the current card,
+    // emit a table_ref instead.
+    auto it = ctx.table_registry.find(tbl_ptr);
+    if (it != ctx.table_registry.end()) {
+        out->set_table_ref(it->second);
+        return OCG_SAVE_OK;
+    }
+
+    // First sighting. Walk the table; bail if it exceeds the size cap.
+    // Pre-count keys for the refuse decision.
+    //
+    // Stack discipline: lua_pushnil + the lua_next loop is self-balancing
+    // — lua_next pops the previous key + pushes new (key, value), and we
+    // explicitly pop the value each iteration. When lua_next returns 0
+    // it leaves the stack as it was after the initial pushnil minus that
+    // nil — i.e., balanced with the entry depth.
+    //
+    // Early-exit on size cap: at that point the stack has [..., key]
+    // (the new key is on top, value already popped). One pop restores
+    // entry depth. (Pre-5c trap: an extra pop here corrupted the stack
+    // and caused "invalid key to 'next'" panics from later iterations.)
+    int total_keys = 0;
+    {
+        lua_pushnil(L);
+        while (lua_next(L, idx > 0 ? idx : idx - 1) != 0) {
+            ++total_keys;
+            lua_pop(L, 1);  // pop value, key remains for next lua_next
+            if (total_keys > kMaxTableKeysToWalk) {
+                lua_pop(L, 1);  // pop the key (no nil-state — lua_next
+                                // consumed the original nil)
+                if (refuse_reason) {
+                    char extra[80];
+                    std::snprintf(extra, sizeof(extra),
+                                  "exceeds chunk-5c size cap (>%d keys)",
+                                  kMaxTableKeysToWalk);
+                    *refuse_reason = format_refuse_reason(
+                        L, idx, card_konami_id, slot_name, upvalue_idx, extra);
+                }
+                return OCG_SAVE_ERR_REFUSE_UNKNOWN_UPVALUE_TYPE;
+            }
+        }
+    }
+
+    // Assign a new handle and record before recursing — this lets a
+    // self-referential table emit table_ref(handle) for itself, breaking
+    // the cycle. (Defensive; not observed in 5c.0 but cheap to support.)
+    const uint32_t handle = ctx.next_table_handle++;
+    ctx.table_registry[tbl_ptr] = handle;
+
+    auto* tdef = out->mutable_table_def();
+    tdef->set_handle(handle);
+
+    // Walk + capture entries.
+    lua_pushnil(L);
+    while (lua_next(L, idx > 0 ? idx : idx - 1) != 0) {
+        // key at -2, value at -1
+        auto* entry = tdef->add_entries();
+        OCG_SaveStatus s;
+
+        // Capture key
+        s = capture_value_recursive(L, -2, d, ctx, card_konami_id, slot_name,
+                                     upvalue_idx, entry->mutable_key(),
+                                     refuse_reason);
+        if (s != OCG_SAVE_OK) {
+            lua_pop(L, 2);
+            return s;
+        }
+
+        // Capture value
+        s = capture_value_recursive(L, -1, d, ctx, card_konami_id, slot_name,
+                                     upvalue_idx, entry->mutable_value(),
+                                     refuse_reason);
+        if (s != OCG_SAVE_OK) {
+            lua_pop(L, 2);
+            return s;
+        }
+        lua_pop(L, 1);  // pop value, keep key for lua_next
+    }
+
+    return OCG_SAVE_OK;
+}
+
+// ---------------------------------------------------------------------------
+// Chunk 5c: capture a value (any type) into a CapturedArg.
+//
+// Replaces capture_known_upvalue. Now handles tables (recursive, via
+// dump_table) and Lua functions (recursive, via dump_function_recursive).
+// C functions, threads, lightuserdata, and other UNKNOWN types refuse.
+//
+// Caller must NOT pre-classify; this function dispatches on lua_type.
+// (Exception: the top-level dump_lua_callback still pre-checks _ENV and
+// script_self_table for fast paths — those return before getting here.)
+// ---------------------------------------------------------------------------
+
+OCG_SaveStatus capture_value_recursive(lua_State* L, int idx, const duel& d,
+                                        LuaSaveContext& ctx,
+                                        uint32_t card_konami_id,
+                                        const char* slot_name,
+                                        int upvalue_idx,
+                                        ocg::state::CapturedArg* out,
+                                        std::string* refuse_reason) {
+    // Normalize idx — when called from inside a recursive context the
+    // caller may pass negative indexes that shift as we push/pop.
+    const int abs_idx = idx > 0 ? idx : lua_absindex(L, idx);
+
+    switch (lua_type(L, abs_idx)) {
+        case LUA_TNIL:
+            out->set_i(0);  // permissive: nil → integer 0 (per plan §13.2 alt)
+            return OCG_SAVE_OK;
+        case LUA_TBOOLEAN:
+            out->set_b(lua_toboolean(L, abs_idx) != 0);
+            return OCG_SAVE_OK;
+        case LUA_TNUMBER:
+            if (lua_isinteger(L, abs_idx)) {
+                out->set_i(lua_tointeger(L, abs_idx));
+            } else {
+                out->set_d(lua_tonumber(L, abs_idx));
+            }
+            return OCG_SAVE_OK;
+        case LUA_TSTRING: {
+            size_t len = 0;
+            const char* s = lua_tolstring(L, abs_idx, &len);
+            out->set_s(s, len);
+            return OCG_SAVE_OK;
+        }
+        case LUA_TUSERDATA: {
+            UpvalueKind kind = classify_userdata(L, abs_idx, d);
+            switch (kind) {
+                case UpvalueKind::CARD: {
+                    void* payload = lua_touserdata(L, abs_idx);
+                    card* obj = *static_cast<card**>(payload);
+                    out->set_card_handle(ctx.hc.assign(obj));
+                    return OCG_SAVE_OK;
+                }
+                case UpvalueKind::EFFECT: {
+                    void* payload = lua_touserdata(L, abs_idx);
+                    effect* obj = *static_cast<effect**>(payload);
+                    out->set_effect_handle(ctx.he.assign(obj));
+                    return OCG_SAVE_OK;
+                }
+                case UpvalueKind::GROUP: {
+                    void* payload = lua_touserdata(L, abs_idx);
+                    group* obj = *static_cast<group**>(payload);
+                    out->set_group_handle(ctx.hg.assign(obj));
+                    return OCG_SAVE_OK;
+                }
+                default:
+                    if (refuse_reason) {
+                        *refuse_reason = format_refuse_reason(
+                            L, abs_idx, card_konami_id, slot_name, upvalue_idx);
+                    }
+                    return OCG_SAVE_ERR_REFUSE_UNKNOWN_UPVALUE_TYPE;
+            }
+        }
+        case LUA_TTABLE:
+            // Special-case script_self table at any nesting depth.
+            {
+                const uint32_t self_code =
+                    detect_script_self_table(L, abs_idx, card_konami_id);
+                if (self_code != 0) {
+                    out->set_script_self_card_code(self_code);
+                    return OCG_SAVE_OK;
+                }
+            }
+            return dump_table(L, abs_idx, d, ctx, card_konami_id, slot_name,
+                              upvalue_idx, out, refuse_reason);
+        case LUA_TFUNCTION:
+            // C functions can't be lua_dump'd. Refuse with informative
+            // reason.
+            if (lua_iscfunction(L, abs_idx)) {
+                if (refuse_reason) {
+                    *refuse_reason = format_refuse_reason(
+                        L, abs_idx, card_konami_id, slot_name, upvalue_idx);
+                }
+                return OCG_SAVE_ERR_REFUSE_UNKNOWN_UPVALUE_TYPE;
+            }
+            // Lua function — recursive dump.
+            return dump_function_recursive(L, abs_idx, d, ctx,
+                                            card_konami_id, slot_name,
+                                            out->mutable_function_def(),
+                                            refuse_reason);
+        default:
+            if (refuse_reason) {
+                *refuse_reason = format_refuse_reason(
+                    L, abs_idx, card_konami_id, slot_name, upvalue_idx);
+            }
+            return OCG_SAVE_ERR_REFUSE_UNKNOWN_UPVALUE_TYPE;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Chunk 5c: dump a Lua function at stack idx into a LuaCallback message.
+//
+// Used both for top-level effect callbacks and for recursive function
+// upvalues. Depth-bounded by ctx.max_depth.
+//
+// Function must be a Lua function (not C). Caller's responsibility to
+// check; this fn refuses with INTERNAL if it sees a C function.
+// ---------------------------------------------------------------------------
+
+OCG_SaveStatus dump_function_recursive(lua_State* L, int fn_idx, const duel& d,
+                                        LuaSaveContext& ctx,
+                                        uint32_t card_konami_id,
+                                        const char* slot_name,
+                                        ocg::state::LuaCallback* out,
+                                        std::string* refuse_reason) {
+    if (ctx.current_depth >= ctx.max_depth) {
+        if (refuse_reason) {
+            *refuse_reason = "function-upvalue recursion exceeded depth cap " +
+                             std::to_string(ctx.max_depth);
+        }
+        return OCG_SAVE_ERR_REFUSE_UNKNOWN_UPVALUE_TYPE;
+    }
+
+    luaL_checkstack(L, 4, nullptr);
+    const int abs_fn_idx = fn_idx > 0 ? fn_idx : lua_absindex(L, fn_idx);
+
+    out->set_present(true);
+
+    // Get nups (consumes a copy of the function).
+    lua_pushvalue(L, abs_fn_idx);
+    lua_Debug ar;
+    std::memset(&ar, 0, sizeof(ar));
+    if (!lua_getinfo(L, ">u", &ar)) {
+        if (refuse_reason) {
+            *refuse_reason = "lua_getinfo failed in recursive dump";
+        }
+        return OCG_SAVE_ERR_INTERNAL;
+    }
+    const int nups = ar.nups;
+
+    // Walk + capture upvalues.
+    ctx.current_depth++;
+    for (int i = 1; i <= nups; ++i) {
+        const char* upname = lua_getupvalue(L, abs_fn_idx, i);
+        if (!upname) {
+            ctx.current_depth--;
+            if (refuse_reason) {
+                *refuse_reason = "lua_getupvalue(" + std::to_string(i) +
+                                 ") returned NULL in recursive dump";
+            }
+            return OCG_SAVE_ERR_INTERNAL;
+        }
+        const int up_idx = lua_gettop(L);
+        ocg::state::CapturedArg* arg = out->add_upvalues();
+
+        if (std::strcmp(upname, "_ENV") == 0) {
+            // VALUE_NOT_SET marker
+            lua_pop(L, 1);
+            continue;
+        }
+
+        OCG_SaveStatus s = capture_value_recursive(
+            L, up_idx, d, ctx, card_konami_id, slot_name, i,
+            arg, refuse_reason);
+        lua_pop(L, 1);
+        if (s != OCG_SAVE_OK) {
+            ctx.current_depth--;
+            return s;
+        }
+    }
+    ctx.current_depth--;
+
+    // Now dump bytecode.
+    //
+    // Stack discipline: lua_dump requires the function at the top of the
+    // stack but does NOT pop it (per Lua 5.3 manual). Push a copy, dump,
+    // then explicitly pop the copy. Failing to pop leaks one stack slot
+    // per recursion level — undetectable until the stack overflows or
+    // until a subsequent lua_next sees an unexpected key type and
+    // panics with "invalid key to 'next'".
+    lua_pushvalue(L, abs_fn_idx);
+    std::string bytecode;
+    const int dump_result = lua_dump(L, &dump_writer, &bytecode, /*strip=*/0);
+    lua_pop(L, 1);  // pop the copy lua_dump left on the stack
+    if (dump_result != 0) {
+        if (refuse_reason) {
+            *refuse_reason = "lua_dump returned " +
+                             std::to_string(dump_result) +
+                             " in recursive dump";
+        }
+        return OCG_SAVE_ERR_INTERNAL;
+    }
+    out->set_bytecode(std::move(bytecode));
+    return OCG_SAVE_OK;
 }
 
 }  // namespace
@@ -276,202 +575,204 @@ UpvalueKind classify_upvalue(lua_State* L, int idx, const duel& d) {
         case LUA_TSTRING:  return UpvalueKind::STRING;
         case LUA_TUSERDATA:
             return classify_userdata(L, idx, d);
+        case LUA_TTABLE:
+            return UpvalueKind::TABLE;
+        case LUA_TFUNCTION:
+            return lua_iscfunction(L, idx) ? UpvalueKind::UNKNOWN
+                                            : UpvalueKind::LUA_FUNCTION;
         default:
             return UpvalueKind::UNKNOWN;
     }
 }
 
-// Detects the canonical `local s,id=GetID()` pattern: is this upvalue
-// the script's own _G["c<owning_card_code>"] table? Returns 0 if not,
-// or the konami code if yes (which identifies which _G[...] table to
-// re-resolve on load).
-//
-// Only meaningful when the upvalue is a table AND the owning card has
-// a non-zero data.code (vanilla cards have code 0 and no script).
-uint32_t detect_script_self_table(lua_State* L, int idx,
-                                   uint32_t owning_card_code) {
-    if (owning_card_code == 0) return 0;
-    if (lua_type(L, idx) != LUA_TTABLE) return 0;
-
-    char buf[32];
-    std::snprintf(buf, sizeof(buf), "c%u", owning_card_code);
-    lua_getglobal(L, buf);
-    if (lua_isnil(L, -1)) {
-        lua_pop(L, 1);
-        return 0;
-    }
-    // lua_rawequal compares without invoking metamethods. The script's
-    // _G["c<code>"] table is unique-by-identity per duel.
-    const int normalized = idx > 0 ? idx : idx - 1;  // adjust for our push
-    const bool same = lua_rawequal(L, normalized, -1) != 0;
-    lua_pop(L, 1);
-    return same ? owning_card_code : 0;
-}
-
 OCG_SaveStatus dump_lua_callback(lua_State* L, int32_t lua_ref, const duel& d,
-                                  HandleTable<card>& hc,
-                                  HandleTable<effect>& he,
-                                  HandleTable<group>& hg,
+                                  LuaSaveContext& ctx,
                                   uint32_t card_konami_id,
                                   const char* slot_name,
                                   ocg::state::LuaCallback* out,
                                   std::string* refuse_reason) {
     out->set_present(false);
-    if (lua_ref == 0) {
-        // No callback set on this slot. Mark absent and return OK.
-        return OCG_SAVE_OK;
-    }
+    if (lua_ref == 0) return OCG_SAVE_OK;
 
     luaL_checkstack(L, 4, nullptr);
     const int top_before = lua_gettop(L);
 
-    // Push the function onto the stack from the registry.
     lua_rawgeti(L, LUA_REGISTRYINDEX, lua_ref);
     if (!lua_isfunction(L, -1)) {
-        // Engine sometimes stores non-function references in effect
-        // callback slots. Examples: Effect.SetValue can take a literal
-        // integer (then `value` is the int, not a Lua-ref); SetLabel
-        // stores integers via SetLabelObject. In these cases the slot
-        // doesn't have a callable Lua function — there's nothing to
-        // dump. Treat as "no callback present" (which is correct: load
-        // restores effect.<slot> from the int32 *_ref field, and if it
-        // pointed at a non-function on save it'll point at the same
-        // non-function value on load).
-        //
-        // Note: this means the saved effect's int32 *_ref fields ARE
-        // load-relevant for these cases. The chunk-3 walk already saves
-        // them as effect_record.{condition,cost,...}_ref. Load-side
-        // load_effect_record_scalars doesn't currently restore those —
-        // see TODO in pass 4 of deserialize_duel for chunk-6 follow-up.
+        // Engine sometimes stores non-function references in callback
+        // slots (e.g. SetValue with a literal int). Treat as absent.
         lua_settop(L, top_before);
         out->set_present(false);
         return OCG_SAVE_OK;
     }
-
-    // Get upvalue count via lua_getinfo with ">u" (consumes the function).
-    lua_Debug ar;
-    std::memset(&ar, 0, sizeof(ar));
-    lua_pushvalue(L, -1);  // duplicate so we still have the function for dump
-    if (!lua_getinfo(L, ">u", &ar)) {
-        lua_settop(L, top_before);
+    if (lua_iscfunction(L, -1)) {
+        // Top-level callback is a C function. lua_dump can't serialize.
+        // Refuse with reason — these are the 6 "lua_dump returned 1"
+        // cases from the chunk-6 measurement, characterized in 5c.0.
         if (refuse_reason) {
-            *refuse_reason = "lua_getinfo failed for callback ref " +
-                             std::to_string(lua_ref);
+            char buf[160];
+            std::snprintf(buf, sizeof(buf),
+                "callback at slot=%s on card=%u is a C function "
+                "(no bytecode dump path; needs C-function registry "
+                "support, deferred per chunk-5c scope cap)",
+                slot_name ? slot_name : "?", card_konami_id);
+            *refuse_reason = buf;
         }
-        return OCG_SAVE_ERR_INTERNAL;
-    }
-    const int nups = ar.nups;
-
-    // Walk + capture each upvalue. The function is at stack top.
-    //
-    // Lua functions have an implicit _ENV upvalue (the script's
-    // environment table) at one of their upvalue slots — typically slot
-    // 1 for top-level functions, but inner closures may inherit it at
-    // various positions. _ENV is a table; classify_upvalue returns
-    // UNKNOWN for tables, which would refuse virtually any callback.
-    //
-    // Mechanism: lua_getupvalue returns the upvalue's NAME as its return
-    // value. For _ENV the name is "_ENV". We emit an empty CapturedArg
-    // (oneof unset = VALUE_NOT_SET) at that slot position. On the load
-    // side, restore_lua_callback skips lua_setupvalue for any empty
-    // CapturedArg — luaL_loadbuffer's freshly-loaded function already
-    // has its _ENV pointing at the load-side _G, which is exactly what
-    // we want. (Save preserves positional alignment, so non-_ENV
-    // upvalues end up at the right slots.)
-    for (int i = 1; i <= nups; ++i) {
-        const char* upname = lua_getupvalue(L, -1, i);
-        if (!upname) {
-            lua_settop(L, top_before);
-            if (refuse_reason) {
-                *refuse_reason = "lua_getupvalue(" + std::to_string(i) +
-                                 ") returned NULL despite nups=" +
-                                 std::to_string(nups);
-            }
-            return OCG_SAVE_ERR_INTERNAL;
-        }
-        const int up_idx = lua_gettop(L);
-        // Always emit a CapturedArg for positional alignment with
-        // load-side lua_setupvalue indexes. _ENV gets an empty
-        // (VALUE_NOT_SET) marker; load skips lua_setupvalue for those.
-        ocg::state::CapturedArg* arg = out->add_upvalues();
-        const bool is_env = (std::strcmp(upname, "_ENV") == 0);
-        if (is_env) {
-            // Emit empty arg; load side preserves the default _ENV.
-            lua_pop(L, 1);
-            continue;
-        }
-        UpvalueKind kind = classify_upvalue(L, up_idx, d);
-        // Special-case: `local s = GetID()` table from ProjectIgnis
-        // scripts. If this is a table that matches _G["c<owner>"], emit
-        // a script_self_card_code marker — load resolves it back via
-        // _G[...] which exists post-card-script-load.
-        if (kind == UpvalueKind::UNKNOWN &&
-            lua_type(L, up_idx) == LUA_TTABLE) {
-            const uint32_t self_code =
-                detect_script_self_table(L, up_idx, card_konami_id);
-            if (self_code != 0) {
-                arg->set_script_self_card_code(self_code);
-                lua_pop(L, 1);
-                continue;
-            }
-        }
-        if (kind == UpvalueKind::UNKNOWN) {
-            if (refuse_reason) {
-                *refuse_reason = format_refuse_reason(L, up_idx,
-                                                       card_konami_id,
-                                                       slot_name, i);
-            }
-            lua_settop(L, top_before);
-            return OCG_SAVE_ERR_REFUSE_UNKNOWN_UPVALUE_TYPE;
-        }
-        if (!capture_known_upvalue(L, up_idx, kind, hc, he, hg, arg)) {
-            lua_settop(L, top_before);
-            if (refuse_reason) {
-                *refuse_reason = "capture_known_upvalue failed for upvalue " +
-                                 std::to_string(i);
-            }
-            return OCG_SAVE_ERR_INTERNAL;
-        }
-        lua_pop(L, 1);  // pop the upvalue
-    }
-
-    // Now dump the function's bytecode. lua_dump consumes the function.
-    std::string bytecode;
-    const int dump_result = lua_dump(L, &dump_writer, &bytecode, /*strip=*/0);
-    if (dump_result != 0) {
         lua_settop(L, top_before);
-        if (refuse_reason) {
-            *refuse_reason = "lua_dump returned " +
-                             std::to_string(dump_result);
-        }
-        return OCG_SAVE_ERR_INTERNAL;
+        return OCG_SAVE_ERR_REFUSE_UNKNOWN_UPVALUE_TYPE;
     }
 
-    out->set_present(true);
-    out->set_bytecode(std::move(bytecode));
+    // The function is at top of stack; let dump_function_recursive handle
+    // upvalue walking + bytecode dump + recursion.
+    OCG_SaveStatus s = dump_function_recursive(L, -1, d, ctx,
+                                                card_konami_id, slot_name,
+                                                out, refuse_reason);
     lua_settop(L, top_before);
-    return OCG_SAVE_OK;
+    return s;
 }
 
-int32_t restore_lua_callback(lua_State* L,
-                              const ocg::state::LuaCallback& saved,
-                              HandleResolver<card>& hc,
-                              HandleResolver<effect>& he,
-                              HandleResolver<group>& hg,
+// ---------------------------------------------------------------------------
+// Load side
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Push a value at the load site for the given CapturedArg.
+// Returns true on success (one value pushed onto the stack).
+// On failure: returns false and writes to load_error; nothing pushed.
+bool restore_value_recursive(lua_State* L,
+                              const ocg::state::CapturedArg& arg,
+                              LuaLoadContext& ctx,
                               std::string* load_error) {
-    if (!saved.present()) {
-        return 0;  // No callback in this slot — return ref 0.
+    switch (arg.value_case()) {
+        case ocg::state::CapturedArg::VALUE_NOT_SET:
+            // Caller (function-restore path) treats this as "skip
+            // setupvalue" rather than pushing a value. But we may also
+            // see VALUE_NOT_SET inside a TableEntry (shouldn't happen but
+            // be defensive) — push nil.
+            lua_pushnil(L);
+            return true;
+        case ocg::state::CapturedArg::kB:
+            lua_pushboolean(L, arg.b() ? 1 : 0);
+            return true;
+        case ocg::state::CapturedArg::kI:
+            lua_pushinteger(L, static_cast<lua_Integer>(arg.i()));
+            return true;
+        case ocg::state::CapturedArg::kD:
+            lua_pushnumber(L, arg.d());
+            return true;
+        case ocg::state::CapturedArg::kS:
+            lua_pushlstring(L, arg.s().data(), arg.s().size());
+            return true;
+        case ocg::state::CapturedArg::kCardHandle: {
+            card* c = ctx.hc.lookup(arg.card_handle());
+            if (c == nullptr) lua_pushnil(L);
+            else interpreter::pushobject(L, c->ref_handle);
+            return true;
+        }
+        case ocg::state::CapturedArg::kEffectHandle: {
+            effect* e = ctx.he.lookup(arg.effect_handle());
+            if (e == nullptr) lua_pushnil(L);
+            else interpreter::pushobject(L, e->ref_handle);
+            return true;
+        }
+        case ocg::state::CapturedArg::kGroupHandle: {
+            group* g = ctx.hg.lookup(arg.group_handle());
+            if (g == nullptr) lua_pushnil(L);
+            else interpreter::pushobject(L, g->ref_handle);
+            return true;
+        }
+        case ocg::state::CapturedArg::kScriptSelfCardCode: {
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "c%u", arg.script_self_card_code());
+            lua_getglobal(L, buf);
+            if (lua_isnil(L, -1)) {
+                if (load_error) {
+                    *load_error = std::string("script_self table _G[\"") +
+                                  buf + "\"] not loaded";
+                }
+                lua_pop(L, 1);
+                return false;
+            }
+            return true;
+        }
+        case ocg::state::CapturedArg::kFunctionDef: {
+            // Recursive function load. luaL_loadbuffer + setupvalues.
+            int32_t ref = restore_function_recursive(L, arg.function_def(),
+                                                       ctx, load_error);
+            if (ref == 0) return false;
+            // restore_function_recursive registered the function in
+            // LUA_REGISTRYINDEX. Push it back onto the stack as the
+            // value to set as upvalue, then unref the registry slot
+            // (the upvalue now holds the strong reference).
+            lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
+            luaL_unref(L, LUA_REGISTRYINDEX, ref);
+            return true;
+        }
+        case ocg::state::CapturedArg::kTableDef: {
+            // First sighting: materialize table, register handle, push.
+            const auto& tdef = arg.table_def();
+            lua_createtable(L, 0, tdef.entries_size());
+            const int tbl_idx = lua_gettop(L);
+            // Register BEFORE walking entries — supports self-referential
+            // tables (matches save side's pre-recursion registry insert).
+            lua_pushvalue(L, tbl_idx);
+            const int ref = luaL_ref(L, LUA_REGISTRYINDEX);
+            ctx.table_handle_to_lua_ref[tdef.handle()] = ref;
+
+            for (const auto& entry : tdef.entries()) {
+                if (!restore_value_recursive(L, entry.key(), ctx, load_error)) {
+                    return false;
+                }
+                if (!restore_value_recursive(L, entry.value(), ctx, load_error)) {
+                    lua_pop(L, 1);  // pop key
+                    return false;
+                }
+                // settable consumes key and value; tbl_idx unchanged.
+                lua_settable(L, tbl_idx);
+            }
+            return true;
+        }
+        case ocg::state::CapturedArg::kTableRef: {
+            auto it = ctx.table_handle_to_lua_ref.find(arg.table_ref());
+            if (it == ctx.table_handle_to_lua_ref.end()) {
+                if (load_error) {
+                    *load_error = "table_ref(" +
+                                  std::to_string(arg.table_ref()) +
+                                  ") not found in load context — save-side "
+                                  "registry mismatch";
+                }
+                return false;
+            }
+            lua_rawgeti(L, LUA_REGISTRYINDEX, it->second);
+            return true;
+        }
     }
+    if (load_error) *load_error = "unhandled CapturedArg variant";
+    return false;
+}
+
+// Recursive function restore. Returns LUA_REGISTRYINDEX ref (>0) on success,
+// 0 on failure (load_error filled).
+//
+// Caller can either keep the ref (top-level effect slot) or push the
+// function back onto the stack via lua_rawgeti(L, LUA_REGISTRYINDEX, ref)
+// for use as an upvalue (recursive case in restore_value_recursive does
+// this and unrefs immediately).
+int32_t restore_function_recursive(lua_State* L,
+                                    const ocg::state::LuaCallback& saved,
+                                    LuaLoadContext& ctx,
+                                    std::string* load_error) {
+    if (!saved.present()) return 0;
     if (saved.bytecode().empty()) {
-        if (load_error) *load_error = "LuaCallback present=true but bytecode empty";
+        if (load_error) *load_error =
+            "LuaCallback present=true but bytecode empty";
         return 0;
     }
 
     luaL_checkstack(L, 4, nullptr);
     const int top_before = lua_gettop(L);
 
-    // Load the function from bytecode. luaL_loadbuffer pushes a function
-    // onto the stack on success.
     const int load_result = luaL_loadbuffer(L,
                                              saved.bytecode().data(),
                                              saved.bytecode().size(),
@@ -480,88 +781,29 @@ int32_t restore_lua_callback(lua_State* L,
         const char* msg = lua_tostring(L, -1);
         if (load_error) {
             *load_error = std::string("luaL_loadbuffer failed: ") +
-                          (msg ? msg : "(no error message)");
+                          (msg ? msg : "(none)");
         }
         lua_settop(L, top_before);
         return 0;
     }
 
-    // Set each upvalue. The function is at stack top.
-    //
-    // VALUE_NOT_SET marks "preserve default" — used for _ENV upvalues
-    // (see save side comment). luaL_loadbuffer already set _ENV to
-    // load-side _G; skipping lua_setupvalue keeps that.
+    // Set upvalues. Function at stack top.
+    const int fn_idx = lua_gettop(L);
     for (int i = 0; i < saved.upvalues_size(); ++i) {
-        const int up_idx = i + 1;  // Lua API is 1-indexed
-        const ocg::state::CapturedArg& arg = saved.upvalues(i);
+        const int up_idx = i + 1;
+        const auto& arg = saved.upvalues(i);
 
         if (arg.value_case() == ocg::state::CapturedArg::VALUE_NOT_SET) {
-            // _ENV or other "preserve default" marker. Skip without
-            // pushing/setting anything.
-            continue;
+            continue;  // _ENV preserved
         }
 
-        // Push the value onto the stack per its type.
-        switch (arg.value_case()) {
-            case ocg::state::CapturedArg::kB:
-                lua_pushboolean(L, arg.b() ? 1 : 0);
-                break;
-            case ocg::state::CapturedArg::kI:
-                lua_pushinteger(L, static_cast<lua_Integer>(arg.i()));
-                break;
-            case ocg::state::CapturedArg::kD:
-                lua_pushnumber(L, arg.d());
-                break;
-            case ocg::state::CapturedArg::kS:
-                lua_pushlstring(L, arg.s().data(), arg.s().size());
-                break;
-            case ocg::state::CapturedArg::kCardHandle: {
-                card* c = hc.lookup(arg.card_handle());
-                if (c == nullptr) lua_pushnil(L);
-                else interpreter::pushobject(L, c->ref_handle);
-                break;
-            }
-            case ocg::state::CapturedArg::kEffectHandle: {
-                effect* e = he.lookup(arg.effect_handle());
-                if (e == nullptr) lua_pushnil(L);
-                else interpreter::pushobject(L, e->ref_handle);
-                break;
-            }
-            case ocg::state::CapturedArg::kGroupHandle: {
-                group* g = hg.lookup(arg.group_handle());
-                if (g == nullptr) lua_pushnil(L);
-                else interpreter::pushobject(L, g->ref_handle);
-                break;
-            }
-            case ocg::state::CapturedArg::kScriptSelfCardCode: {
-                // Look up _G["c<code>"] — the script's class table,
-                // already populated by the engine's load_card_script
-                // path when the owning card was re-allocated in pass 1.
-                char buf[32];
-                std::snprintf(buf, sizeof(buf), "c%u",
-                              arg.script_self_card_code());
-                lua_getglobal(L, buf);
-                if (lua_isnil(L, -1)) {
-                    if (load_error) {
-                        *load_error = std::string("script_self table _G[\"") +
-                                      buf + "\"] not loaded — card script "
-                                      "should have been loaded in pass 1";
-                    }
-                    lua_settop(L, top_before);
-                    return 0;
-                }
-                break;
-            }
-            case ocg::state::CapturedArg::VALUE_NOT_SET:
-                // unreachable — handled above
-                break;
+        if (!restore_value_recursive(L, arg, ctx, load_error)) {
+            lua_settop(L, top_before);
+            return 0;
         }
-
-        // Set as upvalue. lua_setupvalue pops the value and returns the
-        // upvalue's name (NULL on failure / out-of-range).
-        const char* upname = lua_setupvalue(L, -2, up_idx);
+        // Now the value is on top; function below at fn_idx.
+        const char* upname = lua_setupvalue(L, fn_idx, up_idx);
         if (upname == nullptr) {
-            // Out of range or function has fewer upvalues than saved.
             if (load_error) {
                 *load_error = "lua_setupvalue(" + std::to_string(up_idx) +
                               ") returned NULL — upvalue count mismatch";
@@ -571,10 +813,18 @@ int32_t restore_lua_callback(lua_State* L,
         }
     }
 
-    // Register the function in the Lua registry and return the ref.
+    // Register and return ref. luaL_ref pops the function from the stack.
     const int32_t new_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-    // luaL_ref pops the function from the stack.
     return new_ref;
+}
+
+}  // namespace
+
+int32_t restore_lua_callback(lua_State* L,
+                              const ocg::state::LuaCallback& saved,
+                              LuaLoadContext& ctx,
+                              std::string* load_error) {
+    return restore_function_recursive(L, saved, ctx, load_error);
 }
 
 }  // namespace ocg::serialize

@@ -487,5 +487,62 @@ message CapturedArg {
         // script_self_card_code = the owning card's konami code; load
         // resolves via _G["c<code>"], which exists post-card-script-load.
         uint32 script_self_card_code = 8;
+
+        // Chunk 5c additions per phase_p1_primitive_1_plan.md §11.1.b
+        // characterization: function/table upvalues account for ~23% of
+        // the corpus (5c.0 finding). The 5c implementation supports
+        // recursive Lua-function dump (function_def) and small-table
+        // walk (table_def for first encounter; table_ref for repeat
+        // sightings within the same card via per-card pointer registry).
+
+        // Recursive Lua-function upvalue: the function's bytecode +
+        // its own upvalue list (which can themselves nest). C functions
+        // remain refused — they have no bytecode.
+        LuaCallback function_def = 9;
+
+        // First sighting of a captured table within the current card's
+        // save scope. Carries a per-card-unique handle that subsequent
+        // sightings reference via table_ref. This preserves intra-card
+        // table identity across multiple closures (5c.0 found 22.5% of
+        // refused cards have intra-card sharing).
+        TableDef table_def = 10;
+
+        // Reference to a previously-emitted TableDef within the same
+        // card. The handle is per-card scoped: cleared between cards
+        // during save/load. Cross-card sharing is NOT handled by this
+        // mechanism — that would require a duel-wide registry. The
+        // chunk-5c cross-card test fixture surfaces whether cross-card
+        // sharing is prevalent enough in the corpus to warrant the
+        // wider scope.
+        uint32 table_ref = 11;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Captured table content (chunk 5c)
+// ---------------------------------------------------------------------------
+//
+// One TableEntry per (key, value) pair. Both key and value are CapturedArg,
+// recursively. Empty tables have entries.size() == 0.
+//
+// Key types observed in the script corpus (post-filter): mostly number
+// (dispatch tables indexed by TYPE_*/RACE_*) and string (named buckets).
+// Value types: function (the dispatch pattern), number, occasionally other
+// tables.
+//
+// Recursion depth is bounded by the dump path's max_depth check (chunk-5c
+// LuaSaveContext.max_depth) — defaults to 5, sufficient for the 5c.0
+// observed maximum of 8 inner-function-count and ~depth-2 typical case.
+
+message TableEntry {
+    CapturedArg key = 1;
+    CapturedArg value = 2;
+}
+
+message TableDef {
+    // Per-card unique handle. Subsequent sightings of the same
+    // lua_topointer within the same card emit table_ref(handle) instead
+    // of re-serializing entries.
+    uint32 handle = 1;
+    repeated TableEntry entries = 2;
 }
