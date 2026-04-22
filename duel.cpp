@@ -59,13 +59,13 @@ void duel::clear() {
 #ifdef __GNUC__
 #pragma GCC diagnostic pop
 #endif
-card* duel::new_card(uint32_t code) {
+card* duel::new_card(uint32_t code, bool run_initial_effect) {
 	card* pcard = new card(this);
 	cards.insert(pcard);
 	if(code)
 		pcard->data = read_card(code);
 	pcard->data.code = code;
-	lua->register_card(pcard);
+	lua->register_card(pcard, run_initial_effect);
 	return pcard;
 }
 effect* duel::new_effect() {

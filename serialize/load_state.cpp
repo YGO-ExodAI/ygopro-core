@@ -560,7 +560,15 @@ OCG_LoadStatus deserialize_duel(const void* buffer, std::size_t size,
     HandleResolver<group> hg;
 
     // -----------------------------------------------------------------
-    // Pass 1: allocate cards via duel::new_card(data_code).
+    // Pass 1: allocate cards via duel::new_card(data_code, /*run_initial_effect=*/false).
+    //
+    // We skip initial_effect because pass 3 re-allocates all effects from
+    // the saved EffectRecords. Before chunk 8c, load did run initial_effect
+    // per card and then pass 1.5 swept up the engine-created artifacts.
+    // The sweep was correctness-complete but wasteful: new_card dominated
+    // load time (850-3180µs in chunk 10's profile), and everything it
+    // produced was immediately discarded. With the skip flag, pass 1.5
+    // is no longer needed.
     // -----------------------------------------------------------------
     std::vector<card*> allocated_cards;
     allocated_cards.reserve(state.cards_size());
@@ -568,7 +576,7 @@ OCG_LoadStatus deserialize_duel(const void* buffer, std::size_t size,
     for (const auto& cr : state.cards()) {
         const uint32_t code = cr.data_code() != 0 ? cr.data_code()
                                                    : cr.current().code();
-        card* c = d->new_card(code);
+        card* c = d->new_card(code, /*run_initial_effect=*/false);
         ++new_card_count;
         allocated_cards.push_back(c);
         hc.register_handle(cr.handle(), c);
@@ -576,46 +584,6 @@ OCG_LoadStatus deserialize_duel(const void* buffer, std::size_t size,
     (void)new_card_count;  // suppress unused-warning when asserts are off
 
     prof.mark("pass1_alloc_cards");
-
-    // -----------------------------------------------------------------
-    // Pass 1.5: clear engine-created initial_effect artifacts.
-    //
-    // duel::new_card(code) runs the card's initial_effect for non-vanilla
-    // codes, which creates and registers effects via Effect.CreateEffect
-    // + RegisterEffect. Those effects end up in duel.effects AND in the
-    // card's effect_containers. We're about to re-allocate effects from
-    // the saved EffectRecords (pass 3); without clearing the engine's
-    // initial_effect artifacts here, duel.effects ends up with both sets
-    // (saved + engine-created), corrupting round-trip determinism.
-    //
-    // Order matters: clear card.effect_containers BEFORE delete_effect
-    // (which only removes from duel.effects, not from any cards). After
-    // this pass, duel.effects is empty for the loaded cards' contributions.
-    {
-        std::vector<effect*> to_delete;
-        for (card* c : allocated_cards) {
-            for (const auto& kv : c->single_effect)    to_delete.push_back(kv.second);
-            for (const auto& kv : c->field_effect)     to_delete.push_back(kv.second);
-            for (const auto& kv : c->equip_effect)     to_delete.push_back(kv.second);
-            for (const auto& kv : c->target_effect)    to_delete.push_back(kv.second);
-            for (const auto& kv : c->xmaterial_effect) to_delete.push_back(kv.second);
-            c->single_effect.clear();
-            c->field_effect.clear();
-            c->equip_effect.clear();
-            c->target_effect.clear();
-            c->xmaterial_effect.clear();
-        }
-        for (effect* e : to_delete) {
-            // delete_effect removes from duel.effects and frees memory.
-            // Note: a single effect might be referenced from multiple
-            // containers; dedup by tracking visits would be safer, but
-            // for chunk-5b vanilla-and-Type-C fixtures we don't have
-            // shared effects across cards.
-            d->delete_effect(e);
-        }
-    }
-
-    prof.mark("pass1.5_clear_artifacts");
 
     // -----------------------------------------------------------------
     // Pass 2: load card scalars + card-to-card cross-refs.

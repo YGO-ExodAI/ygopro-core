@@ -58,7 +58,7 @@ public:
 	interpreter(duel* pd, const OCG_DuelOptions& options);
 	~interpreter();
 
-	void register_card(card* pcard);
+	void register_card(card* pcard, bool run_initial_effect = true);
 	void register_effect(effect* peffect);
 	void unregister_effect(effect* peffect);
 	void register_group(group* pgroup);

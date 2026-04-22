@@ -72,7 +72,7 @@ interpreter::~interpreter() {
 static inline lua_obj** create_object(lua_State* L) {
 	return static_cast<lua_obj**>(lua_newuserdata(L, sizeof(lua_obj*)));
 }
-void interpreter::register_card(card* pcard) {
+void interpreter::register_card(card* pcard, bool run_initial_effect) {
 	//create a card in by userdata
 	luaL_checkstack(lua_state, 1, nullptr);
 	luaL_checkstack(current_state, 1, nullptr);
@@ -91,7 +91,7 @@ void interpreter::register_card(card* pcard) {
 	lua_setmetatable(current_state, -2);
 	lua_pop(current_state, 1);
 	//Initial
-	if(pcard->data.code) {
+	if(pcard->data.code && run_initial_effect) {
 		const bool forced = !(pcard->data.type & TYPE_NORMAL) || (pcard->data.type & TYPE_PENDULUM);
 		pcard->set_status(STATUS_INITIALIZING, TRUE);
 		add_param<LuaParam::CARD>(pcard);

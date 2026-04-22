@@ -86,7 +86,11 @@ public:
 	~duel();
 	void clear();
 	
-	card* new_card(uint32_t code);
+	// run_initial_effect=false skips the initial_effect Lua call in
+	// register_card. Used by serialize::load_state's pass 1, which
+	// re-allocates effects from saved EffectRecords (pass 3) and
+	// doesn't want the engine's initial_effect artifacts mixed in.
+	card* new_card(uint32_t code, bool run_initial_effect = true);
 	template<typename... Args>
 	group* new_group(Args&&... args) {
 		group* pgroup = new group(this, std::forward<Args>(args)...);
