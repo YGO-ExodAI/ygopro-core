@@ -187,6 +187,20 @@ void write_card_record(const card& src, pb::CardRecord* dst,
 // Returns OCG_SAVE_OK on success, an error status on failure (with
 // refuse_reason filled). The Lua callback dumps may produce
 // OCG_SAVE_ERR_REFUSE_UNKNOWN_UPVALUE_TYPE per plan §13.4.
+//
+// Card-pointer guard: hc_assign_safe wraps hc.assign so that pointers
+// not already in the zone-walk handle table return 0 instead of being
+// assigned a new orphan handle. This catches the engine's temp_card
+// (and any similar engine-internal cards) which would otherwise get
+// handles that have no corresponding CardRecord in the saved blob,
+// breaking load. Discovered via the chunk-5b 27-byte byte-equal gap
+// diagnostic.
+static uint32_t hc_assign_safe(HandleTable<card>& hc, card* ptr) {
+    if (ptr == nullptr) return 0;
+    if (!hc.contains(ptr)) return 0;
+    return hc.assign(ptr);
+}
+
 OCG_SaveStatus write_effect_record(const effect& src, pb::EffectRecord* dst,
                                     const duel& d,
                                     HandleTable<card>& hc,
@@ -220,14 +234,17 @@ OCG_SaveStatus write_effect_record(const effect& src, pb::EffectRecord* dst,
     dst->set_card_type(src.card_type);
     dst->set_active_type(src.active_type);
     dst->set_label_object(src.label_object);
-    dst->set_condition_ref(src.condition);
-    dst->set_cost_ref(src.cost);
-    dst->set_target_ref(src.target);
-    dst->set_value_ref(src.value);
-    dst->set_operation_ref(src.operation);
-    dst->set_owner_card_handle(hc.assign(src.owner));
-    dst->set_handler_card_handle(hc.assign(src.handler));
-    dst->set_active_handler_card_handle(hc.assign(src.active_handler));
+    // Chunk-5b fix: do NOT write the int32 *_ref fields. They were
+    // chunk-3 schema placeholders capturing the engine's Lua registry
+    // indexes — which are meaningless across save/load boundaries
+    // (luaL_ref assigns fresh sequential values on the load side, so
+    // the original scattered values would never re-appear). Wave 2's
+    // LuaCallback bytecode dump is the actual callback transport; the
+    // *_ref fields stay zero in the wire format and are ignored on load.
+    // Ref: 27-byte byte-equal gap diagnostic, chunk-5b session.
+    dst->set_owner_card_handle(hc_assign_safe(hc, src.owner));
+    dst->set_handler_card_handle(hc_assign_safe(hc, src.handler));
+    dst->set_active_handler_card_handle(hc_assign_safe(hc, src.active_handler));
     dst->set_description(src.description);
     for (auto v : src.label) dst->add_label(static_cast<int64_t>(v));
 

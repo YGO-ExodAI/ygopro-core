@@ -1252,7 +1252,14 @@ bool test_chunk5b_dueltaining_round_trip() {
     const size_t effect_count = d_orig->effects.size();
     CHECK_TRUE(effect_count > 0,
                "Dueltaining initial_effect registered effects");
-    std::printf("  Dueltaining registered %zu effects\n", effect_count);
+    std::printf("  Dueltaining registered %zu effects, %zu cards, %zu groups\n",
+                effect_count, d_orig->cards.size(), d_orig->groups.size());
+    // Diagnostic: list all cards and their codes
+    for (card* c : d_orig->cards) {
+        std::printf("    card@%p code=%u cardid=%u\n",
+                    static_cast<void*>(c), c ? c->data.code : 0,
+                    c ? c->cardid : 0);
+    }
 
     void* blob1 = nullptr;
     uint32_t size1 = 0;
@@ -1286,18 +1293,17 @@ bool test_chunk5b_dueltaining_round_trip() {
     CHECK_EQ(OCG_DuelSaveState(loaded, &blob2, &size2), OCG_SAVE_OK,
              "re-save after load");
 
-    CHECK_EQ(size1, size2, "round-trip sizes match");
-    if (std::memcmp(blob1, blob2, size1) != 0) {
-        const uint8_t* x = static_cast<const uint8_t*>(blob1);
-        const uint8_t* y = static_cast<const uint8_t*>(blob2);
-        for (uint32_t i = 0; i < size1; ++i) {
-            if (x[i] != y[i]) {
-                std::fprintf(stderr,
-                    "FAIL: Dueltaining round-trip byte %u differs: "
-                    "0x%02x vs 0x%02x (size=%u)\n", i, x[i], y[i], size1);
-                break;
-            }
-        }
+    if (size1 != size2 || std::memcmp(blob1, blob2, size1) != 0) {
+        std::fprintf(stderr,
+            "FAIL: Dueltaining round-trip blobs differ (size1=%u size2=%u)\n",
+            size1, size2);
+        // Dump both blobs to disk for external diagnosis.
+        std::FILE* fp = std::fopen("/tmp/dueltaining_orig.pb", "wb");
+        if (fp) { std::fwrite(blob1, 1, size1, fp); std::fclose(fp); }
+        fp = std::fopen("/tmp/dueltaining_loaded.pb", "wb");
+        if (fp) { std::fwrite(blob2, 1, size2, fp); std::fclose(fp); }
+        std::fprintf(stderr,
+            "  blobs dumped to /tmp/dueltaining_{orig,loaded}.pb\n");
         OCG_FreeSaveBuffer(blob1); OCG_FreeSaveBuffer(blob2);
         OCG_DestroyDuel(orig); OCG_DestroyDuel(loaded);
         return false;
