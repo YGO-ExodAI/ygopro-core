@@ -258,102 +258,132 @@ bool restore_effect_callback(const pb::LuaCallback& src, int32_t* dst_ref,
     return true;
 }
 
-// Chunk 9a Tier 1: ProcessorState load. Materializes core.units from
-// the saved per-type messages. Tier 1 covers Adjust / Turn /
-// SelectIdleCmd / SelectPlace; non-Tier-1 alternatives in the blob
-// would mean save-side wrote types this loader doesn't know — that's a
-// blob-loader version skew, refuse with INTERNAL.
+// Chunk 9a Tier 1+2: ProcessorState load. Materializes core.units
+// (Tier 1 variants) and core.subunits (Tier 2 variants) from the
+// saved per-type messages. Per-list dispatcher reuses the variant
+// switch since both lists are std::list<processor_unit>.
 //
 // Returns true on success, false (with load_error filled) on malformed
-// data.
+// data or unknown-tier variant.
+bool load_processor_unit_into(
+        const ocg::state::ProcessorUnit& src_unit,
+        std::list<processor_unit>& dst,
+        HandleResolver<card>& hc,
+        const char* list_name,
+        int idx,
+        std::string* load_error) {
+    switch (src_unit.unit_case()) {
+        // ── Tier 1 ──────────────────────────────────────────────
+        case ocg::state::ProcessorUnit::kAdjust: {
+            const auto& m = src_unit.adjust();
+            Processors::emplace_variant<Processors::Adjust>(
+                dst, static_cast<uint16_t>(m.step()));
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kTurn: {
+            const auto& m = src_unit.turn();
+            Processors::emplace_variant<Processors::Turn>(
+                dst, static_cast<uint16_t>(m.step()),
+                static_cast<uint8_t>(m.turn_player()));
+            if (auto* t = Processors::get_opt_variant<Processors::Turn>(
+                    dst.back())) {
+                t->has_performed_second_battle_phase =
+                    m.has_performed_second_battle_phase();
+            }
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kSelectIdleCmd: {
+            const auto& m = src_unit.select_idle_cmd();
+            Processors::emplace_variant<Processors::SelectIdleCmd>(
+                dst, static_cast<uint16_t>(m.step()),
+                static_cast<uint8_t>(m.playerid()));
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kSelectPlace: {
+            const auto& m = src_unit.select_place();
+            Processors::emplace_variant<Processors::SelectPlace>(
+                dst, static_cast<uint16_t>(m.step()),
+                static_cast<uint8_t>(m.playerid()),
+                m.flag(),
+                static_cast<uint8_t>(m.count()));
+            if (auto* p = Processors::get_opt_variant<Processors::SelectPlace>(
+                    dst.back())) {
+                p->disable_field = m.disable_field();
+            }
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kIdleCommand: {
+            const auto& m = src_unit.idle_command();
+            Processors::emplace_variant<Processors::IdleCommand>(
+                dst, static_cast<uint16_t>(m.step()));
+            if (auto* p = Processors::get_opt_variant<Processors::IdleCommand>(
+                    dst.back())) {
+                p->phase_to_change_to = static_cast<uint8_t>(m.phase_to_change_to());
+                p->card_to_reposition = hc.lookup(m.card_to_reposition_handle());
+            }
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kPhaseEvent: {
+            const auto& m = src_unit.phase_event();
+            Processors::emplace_variant<Processors::PhaseEvent>(
+                dst, static_cast<uint16_t>(m.step()),
+                static_cast<uint16_t>(m.phase()));
+            if (auto* p = Processors::get_opt_variant<Processors::PhaseEvent>(
+                    dst.back())) {
+                p->is_opponent = m.is_opponent();
+                p->priority_passed = m.priority_passed();
+            }
+            return true;
+        }
+        // ── Tier 2 ──────────────────────────────────────────────
+        case ocg::state::ProcessorUnit::kSelfDestroy: {
+            const auto& m = src_unit.self_destroy();
+            Processors::emplace_variant<Processors::SelfDestroy>(
+                dst, static_cast<uint16_t>(m.step()));
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kSelfToGrave: {
+            const auto& m = src_unit.self_to_grave();
+            Processors::emplace_variant<Processors::SelfToGrave>(
+                dst, static_cast<uint16_t>(m.step()));
+            return true;
+        }
+        case ocg::state::ProcessorUnit::UNIT_NOT_SET:
+            if (load_error) {
+                *load_error = "ProcessorUnit in '" +
+                              std::string(list_name) + "' at index " +
+                              std::to_string(idx) +
+                              " has no variant set (malformed blob)";
+            }
+            return false;
+        default:
+            if (load_error) {
+                *load_error = "ProcessorUnit in '" +
+                              std::string(list_name) + "' at index " +
+                              std::to_string(idx) + " has variant case (" +
+                              std::to_string(src_unit.unit_case()) +
+                              ") not handled by this loader (Tier 3+)";
+            }
+            return false;
+    }
+}
+
 bool load_processor_state(const ocg::state::ProcessorState& src,
                            processor& core,
                            HandleResolver<card>& hc,
                            std::string* load_error) {
     core.units.clear();
     for (int i = 0; i < src.units_size(); ++i) {
-        const auto& src_unit = src.units(i);
-        switch (src_unit.unit_case()) {
-            case ocg::state::ProcessorUnit::kAdjust: {
-                const auto& m = src_unit.adjust();
-                Processors::emplace_variant<Processors::Adjust>(
-                    core.units, static_cast<uint16_t>(m.step()));
-                break;
-            }
-            case ocg::state::ProcessorUnit::kTurn: {
-                const auto& m = src_unit.turn();
-                Processors::emplace_variant<Processors::Turn>(
-                    core.units, static_cast<uint16_t>(m.step()),
-                    static_cast<uint8_t>(m.turn_player()));
-                // emplace_variant runs the ctor which sets
-                // has_performed_second_battle_phase=false; restore the
-                // saved value via std::get_if on the just-emplaced unit.
-                if (auto* t = Processors::get_opt_variant<Processors::Turn>(
-                        core.units.back())) {
-                    t->has_performed_second_battle_phase =
-                        m.has_performed_second_battle_phase();
-                }
-                break;
-            }
-            case ocg::state::ProcessorUnit::kSelectIdleCmd: {
-                const auto& m = src_unit.select_idle_cmd();
-                Processors::emplace_variant<Processors::SelectIdleCmd>(
-                    core.units, static_cast<uint16_t>(m.step()),
-                    static_cast<uint8_t>(m.playerid()));
-                break;
-            }
-            case ocg::state::ProcessorUnit::kSelectPlace: {
-                const auto& m = src_unit.select_place();
-                Processors::emplace_variant<Processors::SelectPlace>(
-                    core.units, static_cast<uint16_t>(m.step()),
-                    static_cast<uint8_t>(m.playerid()),
-                    m.flag(),
-                    static_cast<uint8_t>(m.count()));
-                if (auto* p = Processors::get_opt_variant<Processors::SelectPlace>(
-                        core.units.back())) {
-                    p->disable_field = m.disable_field();
-                }
-                break;
-            }
-            case ocg::state::ProcessorUnit::kIdleCommand: {
-                const auto& m = src_unit.idle_command();
-                Processors::emplace_variant<Processors::IdleCommand>(
-                    core.units, static_cast<uint16_t>(m.step()));
-                if (auto* p = Processors::get_opt_variant<Processors::IdleCommand>(
-                        core.units.back())) {
-                    p->phase_to_change_to = static_cast<uint8_t>(m.phase_to_change_to());
-                    p->card_to_reposition = hc.lookup(m.card_to_reposition_handle());
-                }
-                break;
-            }
-            case ocg::state::ProcessorUnit::kPhaseEvent: {
-                const auto& m = src_unit.phase_event();
-                Processors::emplace_variant<Processors::PhaseEvent>(
-                    core.units, static_cast<uint16_t>(m.step()),
-                    static_cast<uint16_t>(m.phase()));
-                if (auto* p = Processors::get_opt_variant<Processors::PhaseEvent>(
-                        core.units.back())) {
-                    p->is_opponent = m.is_opponent();
-                    p->priority_passed = m.priority_passed();
-                }
-                break;
-            }
-            case ocg::state::ProcessorUnit::UNIT_NOT_SET:
-                if (load_error) {
-                    *load_error = "ProcessorUnit at index " +
-                                  std::to_string(i) +
-                                  " has no variant set (malformed blob)";
-                }
-                return false;
-            default:
-                if (load_error) {
-                    *load_error = "ProcessorUnit at index " +
-                                  std::to_string(i) + " has Tier 2/3 "
-                                  "variant case (" +
-                                  std::to_string(src_unit.unit_case()) +
-                                  ") not handled by this loader";
-                }
-                return false;
+        if (!load_processor_unit_into(src.units(i), core.units, hc,
+                                       "units", i, load_error)) {
+            return false;
+        }
+    }
+    core.subunits.clear();
+    for (int i = 0; i < src.subunits_size(); ++i) {
+        if (!load_processor_unit_into(src.subunits(i), core.subunits, hc,
+                                       "subunits", i, load_error)) {
+            return false;
         }
     }
     return true;

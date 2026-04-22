@@ -324,86 +324,114 @@ void write_chain(const field& f, pb::ChainStack* dst,
     // duels never have these populated). Full walk in chunk 4-5.
 }
 
-// Chunk 9a Tier 1: ProcessorState save with type-gated walk.
-// Lifts the chunk-5a fail-loud on `units`. Walks each unit; refuses
-// with informative reason if any unit is a non-Tier-1 type. Tier 2/3
-// add their variant types incrementally.
+// Chunk 9a Tier 1+2: ProcessorState save with type-gated walk.
+// Walks both core.units (Tier 1) and core.subunits (Tier 2) into the
+// ProcessorState message. Per-list, refuses with informative reason if
+// any entry is a variant type not in the current tier's coverage.
 //
-// Returns OCG_SAVE_OK on success, REFUSE_UNKNOWN_UPVALUE_TYPE when a
-// non-Tier-1 unit is encountered (reusing the existing refuse status
-// rather than adding a new one — semantically the same: "this state
-// shape isn't supported by the current classifier").
+// Tier coverage:
+//   Tier 1 (units, in handler stack at decision boundaries):
+//     Adjust / Turn / SelectIdleCmd / SelectPlace / IdleCommand /
+//     PhaseEvent
+//   Tier 2 (subunits, queued by effect-monster initial_effect):
+//     SelfDestroy / SelfToGrave
+//
+// Same handler used for both lists since they're the same
+// processor_unit variant — coverage tier is enforced per-list by
+// which handler-cases match.
+//
+// Returns OCG_SAVE_OK on success, REFUSE_UNKNOWN_UPVALUE_TYPE on a
+// non-covered variant.
+OCG_SaveStatus write_processor_unit_inner(
+        const processor_unit& u,
+        pb::ProcessorUnit* dst_unit,
+        HandleTable<card>& hc,
+        const char* list_name,
+        int unit_idx,
+        std::string* refuse_reason) {
+    return std::visit(
+        [&](const auto& v) -> OCG_SaveStatus {
+            using T = std::decay_t<decltype(v)>;
+            // ── Tier 1 variants ──────────────────────────────────
+            if constexpr (std::is_same_v<T, Processors::Adjust>) {
+                auto* m = dst_unit->mutable_adjust();
+                m->set_step(v.step);
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::Turn>) {
+                auto* m = dst_unit->mutable_turn();
+                m->set_step(v.step);
+                m->set_turn_player(v.turn_player);
+                m->set_has_performed_second_battle_phase(
+                    v.has_performed_second_battle_phase);
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::SelectIdleCmd>) {
+                auto* m = dst_unit->mutable_select_idle_cmd();
+                m->set_step(v.step);
+                m->set_playerid(v.playerid);
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::SelectPlace>) {
+                auto* m = dst_unit->mutable_select_place();
+                m->set_step(v.step);
+                m->set_playerid(v.playerid);
+                m->set_count(v.count);
+                m->set_flag(v.flag);
+                m->set_disable_field(v.disable_field);
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::IdleCommand>) {
+                auto* m = dst_unit->mutable_idle_command();
+                m->set_step(v.step);
+                m->set_phase_to_change_to(v.phase_to_change_to);
+                m->set_card_to_reposition_handle(
+                    hc_assign_safe(hc, v.card_to_reposition));
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::PhaseEvent>) {
+                auto* m = dst_unit->mutable_phase_event();
+                m->set_step(v.step);
+                m->set_phase(v.phase);
+                m->set_is_opponent(v.is_opponent);
+                m->set_priority_passed(v.priority_passed);
+                return OCG_SAVE_OK;
+            // ── Tier 2 variants ──────────────────────────────────
+            } else if constexpr (std::is_same_v<T, Processors::SelfDestroy>) {
+                auto* m = dst_unit->mutable_self_destroy();
+                m->set_step(v.step);
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::SelfToGrave>) {
+                auto* m = dst_unit->mutable_self_to_grave();
+                m->set_step(v.step);
+                return OCG_SAVE_OK;
+            } else {
+                if (refuse_reason) {
+                    char buf[240];
+                    std::snprintf(buf, sizeof(buf),
+                        "chunk-9a Tier 1+2 stub: processor unit in '%s' "
+                        "at index %d is type '%s' (not in current tier "
+                        "coverage). Tier 3 (or wider Tier 2 if this is "
+                        "the next dominant variant) lifts this.",
+                        list_name, unit_idx, typeid(T).name());
+                    *refuse_reason = buf;
+                }
+                return OCG_SAVE_ERR_REFUSE_UNKNOWN_UPVALUE_TYPE;
+            }
+        }, u);
+}
+
 OCG_SaveStatus write_processor(const processor& core, pb::ProcessorState* dst,
                                 HandleTable<card>& hc,
                                 HandleTable<effect>& /*he*/,
                                 HandleTable<group>& /*hg*/,
                                 std::string* refuse_reason) {
-    // Tier 1 covers Adjust / Turn / SelectIdleCmd / SelectPlace.
-    // Walk units in order; each becomes a per-type message inside
-    // ProcessorUnit's oneof. Non-Tier-1 types refuse cleanly.
-    int unit_idx = 0;
+    int idx = 0;
     for (const auto& u : core.units) {
-        auto* dst_unit = dst->add_units();
-        // std::visit dispatches on the active alternative. The
-        // type-name-string in the refuse reason helps the corpus
-        // measurement classify residual by remaining type.
-        OCG_SaveStatus status = std::visit(
-            [&](const auto& v) -> OCG_SaveStatus {
-                using T = std::decay_t<decltype(v)>;
-                if constexpr (std::is_same_v<T, Processors::Adjust>) {
-                    auto* m = dst_unit->mutable_adjust();
-                    m->set_step(v.step);
-                    return OCG_SAVE_OK;
-                } else if constexpr (std::is_same_v<T, Processors::Turn>) {
-                    auto* m = dst_unit->mutable_turn();
-                    m->set_step(v.step);
-                    m->set_turn_player(v.turn_player);
-                    m->set_has_performed_second_battle_phase(
-                        v.has_performed_second_battle_phase);
-                    return OCG_SAVE_OK;
-                } else if constexpr (std::is_same_v<T, Processors::SelectIdleCmd>) {
-                    auto* m = dst_unit->mutable_select_idle_cmd();
-                    m->set_step(v.step);
-                    m->set_playerid(v.playerid);
-                    return OCG_SAVE_OK;
-                } else if constexpr (std::is_same_v<T, Processors::SelectPlace>) {
-                    auto* m = dst_unit->mutable_select_place();
-                    m->set_step(v.step);
-                    m->set_playerid(v.playerid);
-                    m->set_count(v.count);
-                    m->set_flag(v.flag);
-                    m->set_disable_field(v.disable_field);
-                    return OCG_SAVE_OK;
-                } else if constexpr (std::is_same_v<T, Processors::IdleCommand>) {
-                    auto* m = dst_unit->mutable_idle_command();
-                    m->set_step(v.step);
-                    m->set_phase_to_change_to(v.phase_to_change_to);
-                    m->set_card_to_reposition_handle(
-                        hc_assign_safe(hc, v.card_to_reposition));
-                    return OCG_SAVE_OK;
-                } else if constexpr (std::is_same_v<T, Processors::PhaseEvent>) {
-                    auto* m = dst_unit->mutable_phase_event();
-                    m->set_step(v.step);
-                    m->set_phase(v.phase);
-                    m->set_is_opponent(v.is_opponent);
-                    m->set_priority_passed(v.priority_passed);
-                    return OCG_SAVE_OK;
-                } else {
-                    if (refuse_reason) {
-                        char buf[200];
-                        std::snprintf(buf, sizeof(buf),
-                            "chunk-9a Tier 1 stub: processor unit at "
-                            "index %d is type '%s' (not in "
-                            "Adjust/Turn/SelectIdleCmd/SelectPlace). "
-                            "Tier 2/3 add the remaining variants.",
-                            unit_idx, typeid(T).name());
-                        *refuse_reason = buf;
-                    }
-                    return OCG_SAVE_ERR_REFUSE_UNKNOWN_UPVALUE_TYPE;
-                }
-            }, u);
-        if (status != OCG_SAVE_OK) return status;
-        ++unit_idx;
+        OCG_SaveStatus s = write_processor_unit_inner(
+            u, dst->add_units(), hc, "units", idx++, refuse_reason);
+        if (s != OCG_SAVE_OK) return s;
+    }
+    idx = 0;
+    for (const auto& u : core.subunits) {
+        OCG_SaveStatus s = write_processor_unit_inner(
+            u, dst->add_subunits(), hc, "subunits", idx++, refuse_reason);
+        if (s != OCG_SAVE_OK) return s;
     }
     return OCG_SAVE_OK;
 }
@@ -445,28 +473,32 @@ OCG_SaveStatus serialize_duel(const duel& d, std::string* out,
     // Still stubbed and refused: ProcessorState (units/subunits), pending
     // chain lists (tpchain/ntpchain/select_chains), full effect+group
     // walks. These land in chunk 5b alongside the Lua closure work.
-    // Chunk 9a Tier 1 lifted the units guard — write_processor below
-    // handles `units` directly (refusing on non-Tier-1 types). Still
-    // refusing on subunits + pending-chain lists here; Tier 2 lifts
-    // those.
+    // Chunk 9a Tier 2 lifted the subunits guard — write_processor
+    // below handles both core.units (Tier 1 variants) and core.subunits
+    // (Tier 2 variants), refusing on out-of-coverage types per-list.
+    // Still refusing on chain_lists (tpchain/ntpchain/select_chains) —
+    // §15 characterization saw zero population in the corpus, so
+    // lifting without a characterization pass would be speculative
+    // implement.
     if (d.game_field) {
         const auto& core = d.game_field->core;
-        if (!core.subunits.empty() ||
-            !core.tpchain.empty() || !core.ntpchain.empty() ||
+        if (!core.tpchain.empty() || !core.ntpchain.empty() ||
             !core.select_chains.empty()) {
             *refuse_reason =
-                "chunk-9a Tier 1 stub: subunits / tpchain / ntpchain / "
-                "select_chains are not yet wired into the save path; "
-                "Tier 2 lands them. First fixture that hits this should "
-                "drive the next tier.";
+                "chunk-9a Tier 2 stub: tpchain / ntpchain / "
+                "select_chains are not yet wired into the save path. "
+                "§15 characterization observed zero population at "
+                "single-card-add scenarios; first fixture that hits "
+                "this drives a follow-up characterization pass.";
             return OCG_SAVE_ERR_INTERNAL;
         }
     }
     // Chunk 5b Wave 2: effects, groups, card.effect_container refs, and
-    // chain links are all wired. Lua callbacks dump per plan §13.4.
-    // Chunk 9a Tier 1: core.units handled by write_processor (Tier 1
-    // types only). Tier 2 expands variant coverage and lifts the
-    // subunits / chain_list refuses above.
+    // chain links are wired. Lua callbacks dump per plan §13.4.
+    // Chunk 9a Tier 1+2: core.units + core.subunits handled by
+    // write_processor (Tier-coverage variants only). Tier 3 (if
+    // chosen) expands variant coverage further; chain_lists wait for
+    // a separate characterization pass.
 
     // 2. Build handle tables in deterministic order.
     HandleTable<card> ht_cards;

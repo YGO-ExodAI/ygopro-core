@@ -445,7 +445,11 @@ message ProcessorUnit {
         // measurement-driven Tier 1 expansion per user directive.
         ProcIdleCommand    idle_command    = 104;
         ProcPhaseEvent     phase_event     = 105;
-        // Tier 2/3 variants add their own field numbers when landed.
+        // ── Tier 2 (per §15 characterization, 2 trivial variants
+        // covering 100% of the 57 PROCESSOR_SUBUNIT corpus residual) ──
+        ProcSelfDestroy    self_destroy    = 106;
+        ProcSelfToGrave    self_to_grave   = 107;
+        // Tier 3 variants add their own field numbers when landed.
     }
 }
 
@@ -489,6 +493,17 @@ message ProcPhaseEvent {
     uint32 phase = 2;                                // uint16 in C++
     bool is_opponent = 3;
     bool priority_passed = 4;
+}
+
+// Tier 2: SelfDestroy / SelfToGrave — Process<false>-derived with no
+// fields beyond `step`. Per §15 characterization, these two cover
+// 100% of the 57-card PROCESSOR_SUBUNIT residual.
+message ProcSelfDestroy {
+    uint32 step = 1;
+}
+
+message ProcSelfToGrave {
+    uint32 step = 1;
 }
 
 // ---------------------------------------------------------------------------

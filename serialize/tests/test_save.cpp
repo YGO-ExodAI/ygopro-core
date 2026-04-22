@@ -1223,6 +1223,18 @@ constexpr ScriptedCard kScriptedCards[] = {
     // closure whose upvalue is the inner closure produced by Ritual.CreateProc.
     // Function-typed upvalue exercises the §13.4 refuse path (UNKNOWN type).
     {2266498, kTypeSpell | kTypeRitual, 0, 0, 0, 0, 0},
+
+    // Earthbound Immortal Aslla piscu (c10875327) — Effect Monster.
+    // Tier 2 fixture: initial_effect queues a SelfDestroy subunit (the
+    // "destroy this card if you control no Field Spell" rule). Picked
+    // from the §15 measurement's 47-card SelfDestroy class.
+    {10875327, kTypeMonster | kTypeEffect, 10, 0x4 /*ATTR_DARK*/, 0, 2500, 2500},
+
+    // Advanced Crystal Beast Amber Mammoth (c18847598) — Effect Monster.
+    // Tier 2 fixture: initial_effect queues a SelfToGrave subunit. Picked
+    // from the §15 measurement's 10-card SelfToGrave class. Crystal Beast
+    // archetype concentration per the user's fixture-selection note.
+    {18847598, kTypeMonster | kTypeEffect, 4, 0x10 /*ATTR_EARTH*/, 0, 1000, 1800},
 };
 
 void scripted_card_reader(void* /*payload*/, uint32_t code,
@@ -1592,6 +1604,32 @@ bool test_chunk5c_cross_card_shared_round_trip() {
 }
 
 // ---------------------------------------------------------------------------
+// CHUNK 9a Tier 2: subunit round-trip — single-card-add scenarios where
+// initial_effect queues a SelfDestroy or SelfToGrave subunit.
+//
+// Per §15 characterization, both variants are trivial (only `step`
+// field). Round-trip = scripted_round_trip helper byte-equal — no
+// special handling needed since the scripted_round_trip path doesn't
+// call StartDuel and therefore doesn't trip the chain_lists guard.
+// ---------------------------------------------------------------------------
+
+bool test_chunk9a_tier2_self_destroy_round_trip() {
+    // Earthbound Immortal Aslla piscu (c10875327): SelfDestroy variant.
+    constexpr uint32_t LOC_HAND = 0x2;
+    constexpr uint32_t POS_FACEUP_ATK = 0x1;
+    return scripted_round_trip("9a_tier2_self_destroy", 10875327,
+                               LOC_HAND, /*seq=*/0, POS_FACEUP_ATK, 0x9A21);
+}
+
+bool test_chunk9a_tier2_self_to_grave_round_trip() {
+    // Advanced Crystal Beast Amber Mammoth (c18847598): SelfToGrave variant.
+    constexpr uint32_t LOC_HAND = 0x2;
+    constexpr uint32_t POS_FACEUP_ATK = 0x1;
+    return scripted_round_trip("9a_tier2_self_to_grave", 18847598,
+                               LOC_HAND, /*seq=*/0, POS_FACEUP_ATK, 0x9A22);
+}
+
+// ---------------------------------------------------------------------------
 // MSG-stream verification helper for Type-C fixtures.
 //
 // Sequence:
@@ -1734,6 +1772,11 @@ int main() {
         // Chunk 9a Tier 1 — ProcessorState round-trip at engine boundary
         {"chunk9a_processor_state_round_trip",
          &test_chunk9a_processor_state_round_trip},
+        // Chunk 9a Tier 2 — subunit round-trips
+        {"chunk9a_tier2_self_destroy_round_trip",
+         &test_chunk9a_tier2_self_destroy_round_trip},
+        {"chunk9a_tier2_self_to_grave_round_trip",
+         &test_chunk9a_tier2_self_to_grave_round_trip},
         // Chunk 5b Wave 1 — card_set fields for effect-targeting
         {"chunk5b_card_set_round_trip", &test_chunk5b_card_set_round_trip},
         // Chunk 5b Wave 3 — Type-C fixtures (byte-equal round-trip)
