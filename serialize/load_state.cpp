@@ -161,9 +161,24 @@ void load_card_record(const pb::CardRecord& src, card* dst,
     dst->cover = src.cover();
     dst->spsummon_code = src.spsummon_code();
 
-    // Effect refs / unique_effect deferred to chunk 5b — those require
-    // the effect-load path to exist. For chunk 5a vanilla fixtures we
-    // assert these are empty on the save side.
+    // Chunk 5b: card_set fields for effect-targeting load-stability.
+    dst->material_cards.clear();
+    for (uint32_t h : src.material_cards()) {
+        if (card* c = hc.lookup(h)) dst->material_cards.insert(c);
+    }
+    dst->effect_target_owner.clear();
+    for (uint32_t h : src.effect_target_owner()) {
+        if (card* c = hc.lookup(h)) dst->effect_target_owner.insert(c);
+    }
+    dst->effect_target_cards.clear();
+    for (uint32_t h : src.effect_target_cards()) {
+        if (card* c = hc.lookup(h)) dst->effect_target_cards.insert(c);
+    }
+
+    // Effect refs / unique_effect: chunk 5b adds effect load (this commit).
+    // The actual rebinding happens in the deserialize_duel main loop after
+    // all effects are allocated, since effect handles aren't resolvable
+    // until then.
 }
 
 }  // namespace

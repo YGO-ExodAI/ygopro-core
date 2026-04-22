@@ -161,6 +161,26 @@ void write_card_record(const card& src, pb::CardRecord* dst,
     dst->set_cover(src.cover);
     dst->set_spsummon_code(src.spsummon_code);
     dst->set_data_code(src.data.code);  // canonical id; load passes to new_card
+
+    // Chunk 5b: card_set fields for effect-targeting load-stability.
+    // Sort each by cardid for stable serialization (card_set is
+    // unordered_set in C++).
+    auto sort_card_set = [](const card_set& s) {
+        std::vector<card*> v(s.begin(), s.end());
+        std::sort(v.begin(), v.end(), [](card* a, card* b) {
+            return a->cardid < b->cardid;
+        });
+        return v;
+    };
+    for (card* c : sort_card_set(src.material_cards)) {
+        dst->add_material_cards(hc.assign(c));
+    }
+    for (card* c : sort_card_set(src.effect_target_owner)) {
+        dst->add_effect_target_owner(hc.assign(c));
+    }
+    for (card* c : sort_card_set(src.effect_target_cards)) {
+        dst->add_effect_target_cards(hc.assign(c));
+    }
 }
 
 void write_effect_record(const effect& src, pb::EffectRecord* dst,

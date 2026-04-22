@@ -585,6 +585,8 @@ bool test_load_null_options_rejected() {
     return true;
 }
 
+// (chunk-5b card_set test moved below the chunk-5a fixtures it depends on)
+
 // ---------------------------------------------------------------------------
 // Perf scaffold (chunk 4) — vanilla fixtures only.
 //
@@ -986,6 +988,103 @@ bool test_chunk5a_msg_stream_baseline_vs_load() {
 }
 
 // ---------------------------------------------------------------------------
+// CHUNK 5b Wave 1: card schema extensions for effect-targeting load-stability
+// (clarification #3). Mutate effect_target_cards / effect_target_owner /
+// material_cards on a save-side duel, save → load → save, assert byte-equal
+// AND that the new fields restored correctly.
+// ---------------------------------------------------------------------------
+
+bool test_chunk5b_card_set_round_trip() {
+    OCG_Duel orig = make_chunk5a_duel(0xC5B1);
+    CHECK_TRUE(orig != nullptr, "create orig");
+    populate_simple_deck(orig);  // 18 cards across 2 players
+
+    auto* d_orig = static_cast<duel*>(orig);
+
+    // Pick three cards from p0's deck and wire up cross-references in the
+    // new chunk-5b card_set fields. These would normally be populated by
+    // effect resolution mid-game; we mutate directly to test the schema.
+    CHECK_TRUE(d_orig->game_field->player[0].list_main.size() >= 3,
+               "need at least 3 cards");
+    card* a = d_orig->game_field->player[0].list_main[0];
+    card* b = d_orig->game_field->player[0].list_main[1];
+    card* c = d_orig->game_field->player[0].list_main[2];
+    CHECK_TRUE(a && b && c, "card pointers non-null");
+
+    a->effect_target_cards.insert(b);
+    a->effect_target_cards.insert(c);
+    a->effect_target_owner.insert(b);
+    a->material_cards.insert(c);
+    b->material_cards.insert(a);
+
+    void* blob1 = nullptr;
+    uint32_t size1 = 0;
+    CHECK_EQ(OCG_DuelSaveState(orig, &blob1, &size1), OCG_SAVE_OK,
+             "save with mutated card_sets");
+
+    OCG_DuelOptions opts = make_chunk5a_load_options();
+    OCG_Duel loaded = nullptr;
+    CHECK_EQ(OCG_DuelLoadState(blob1, size1, &opts, &loaded), OCG_LOAD_OK,
+             "load");
+
+    void* blob2 = nullptr;
+    uint32_t size2 = 0;
+    CHECK_EQ(OCG_DuelSaveState(loaded, &blob2, &size2), OCG_SAVE_OK,
+             "re-save");
+
+    CHECK_EQ(size1, size2, "round-trip sizes match");
+    if (std::memcmp(blob1, blob2, size1) != 0) {
+        const uint8_t* x = static_cast<const uint8_t*>(blob1);
+        const uint8_t* y = static_cast<const uint8_t*>(blob2);
+        for (uint32_t i = 0; i < size1; ++i) {
+            if (x[i] != y[i]) {
+                std::fprintf(stderr,
+                    "FAIL: card_set round-trip byte %u differs: "
+                    "0x%02x vs 0x%02x\n", i, x[i], y[i]);
+                break;
+            }
+        }
+        OCG_FreeSaveBuffer(blob1); OCG_FreeSaveBuffer(blob2);
+        OCG_DestroyDuel(orig); OCG_DestroyDuel(loaded);
+        return false;
+    }
+
+    // Direct verification on loaded duel.
+    auto* d_loaded = static_cast<duel*>(loaded);
+    auto find_by_cardid = [&](uint32_t cardid) -> card* {
+        for (card* p : d_loaded->cards) {
+            if (p && p->cardid == cardid) return p;
+        }
+        return nullptr;
+    };
+    card* a_loaded = find_by_cardid(a->cardid);
+    card* b_loaded = find_by_cardid(b->cardid);
+    card* c_loaded = find_by_cardid(c->cardid);
+    CHECK_TRUE(a_loaded && b_loaded && c_loaded,
+               "loaded counterparts located");
+    CHECK_EQ(a_loaded->effect_target_cards.size(), 2u,
+             "a.effect_target_cards size");
+    CHECK_TRUE(a_loaded->effect_target_cards.count(b_loaded) == 1,
+               "a.effect_target_cards contains b");
+    CHECK_TRUE(a_loaded->effect_target_cards.count(c_loaded) == 1,
+               "a.effect_target_cards contains c");
+    CHECK_EQ(a_loaded->effect_target_owner.size(), 1u,
+             "a.effect_target_owner size");
+    CHECK_TRUE(a_loaded->effect_target_owner.count(b_loaded) == 1,
+               "a.effect_target_owner contains b");
+    CHECK_EQ(a_loaded->material_cards.size(), 1u, "a.material_cards size");
+    CHECK_TRUE(a_loaded->material_cards.count(c_loaded) == 1,
+               "a.material_cards contains c");
+    CHECK_EQ(b_loaded->material_cards.size(), 1u, "b.material_cards size");
+    CHECK_TRUE(b_loaded->material_cards.count(a_loaded) == 1,
+               "b.material_cards contains a");
+
+    OCG_FreeSaveBuffer(blob1); OCG_FreeSaveBuffer(blob2);
+    OCG_DestroyDuel(orig); OCG_DestroyDuel(loaded);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // Free-buffer is safe on null
 // ---------------------------------------------------------------------------
 
@@ -1025,6 +1124,8 @@ int main() {
         {"chunk5a_card_round_trip", &test_chunk5a_card_round_trip},
         {"chunk5a_msg_stream_baseline_vs_load",
          &test_chunk5a_msg_stream_baseline_vs_load},
+        // Chunk 5b Wave 1 — card_set fields for effect-targeting
+        {"chunk5b_card_set_round_trip", &test_chunk5b_card_set_round_trip},
         // Chunk 4 perf scaffold (informational; not gated)
         {"perf_scaffold_vanilla", &test_perf_scaffold_vanilla},
     };

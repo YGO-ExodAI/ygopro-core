@@ -219,6 +219,16 @@ message CardRecord {
     // Both are saved so load can call new_card(data_code) and then
     // restore current.code on top.
     uint32 data_code = 70;
+
+    // Chunk 5b: card_set fields needed for effect-targeting load-stability.
+    // Required for engine accessors like e:GetHandler():GetCardTarget() and
+    // e:GetHandler():GetFirstCardTarget() to return the same group on the
+    // loaded card as on the original (clarification #3 in the chunk-5b brief).
+    // All three are unordered_set<card*> in C++; saved sorted by cardid for
+    // determinism (matches the equiping_cards walk).
+    repeated uint32 material_cards = 80;
+    repeated uint32 effect_target_owner = 81;
+    repeated uint32 effect_target_cards = 82;
 }
 
 message CardRelation {
