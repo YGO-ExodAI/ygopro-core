@@ -11,8 +11,14 @@
 #include "../field.h"
 #include "../group.h"
 #include "../interpreter.h"
+// Chunk 9a Tier 1: ProcessorState walk needs the variant + Processor::*
+// type definitions for std::visit dispatch.
+#include "../processor_unit.h"
 
 #include <algorithm>
+#include <type_traits>
+#include <typeinfo>
+#include <variant>
 #include <vector>
 
 namespace ocg::serialize {
@@ -318,12 +324,88 @@ void write_chain(const field& f, pb::ChainStack* dst,
     // duels never have these populated). Full walk in chunk 4-5.
 }
 
-void write_processor(const processor& /*core*/, pb::ProcessorState* /*dst*/,
-                     HandleTable<card>& /*hc*/, HandleTable<effect>& /*he*/,
-                     HandleTable<group>& /*hg*/) {
-    // Stub for chunk 3. Vanilla post-CreateDuel state has no processor
-    // units pushed (those come from StartDuel). Chunk 4 implements when
-    // fixtures begin exercising actual game flow.
+// Chunk 9a Tier 1: ProcessorState save with type-gated walk.
+// Lifts the chunk-5a fail-loud on `units`. Walks each unit; refuses
+// with informative reason if any unit is a non-Tier-1 type. Tier 2/3
+// add their variant types incrementally.
+//
+// Returns OCG_SAVE_OK on success, REFUSE_UNKNOWN_UPVALUE_TYPE when a
+// non-Tier-1 unit is encountered (reusing the existing refuse status
+// rather than adding a new one — semantically the same: "this state
+// shape isn't supported by the current classifier").
+OCG_SaveStatus write_processor(const processor& core, pb::ProcessorState* dst,
+                                HandleTable<card>& hc,
+                                HandleTable<effect>& /*he*/,
+                                HandleTable<group>& /*hg*/,
+                                std::string* refuse_reason) {
+    // Tier 1 covers Adjust / Turn / SelectIdleCmd / SelectPlace.
+    // Walk units in order; each becomes a per-type message inside
+    // ProcessorUnit's oneof. Non-Tier-1 types refuse cleanly.
+    int unit_idx = 0;
+    for (const auto& u : core.units) {
+        auto* dst_unit = dst->add_units();
+        // std::visit dispatches on the active alternative. The
+        // type-name-string in the refuse reason helps the corpus
+        // measurement classify residual by remaining type.
+        OCG_SaveStatus status = std::visit(
+            [&](const auto& v) -> OCG_SaveStatus {
+                using T = std::decay_t<decltype(v)>;
+                if constexpr (std::is_same_v<T, Processors::Adjust>) {
+                    auto* m = dst_unit->mutable_adjust();
+                    m->set_step(v.step);
+                    return OCG_SAVE_OK;
+                } else if constexpr (std::is_same_v<T, Processors::Turn>) {
+                    auto* m = dst_unit->mutable_turn();
+                    m->set_step(v.step);
+                    m->set_turn_player(v.turn_player);
+                    m->set_has_performed_second_battle_phase(
+                        v.has_performed_second_battle_phase);
+                    return OCG_SAVE_OK;
+                } else if constexpr (std::is_same_v<T, Processors::SelectIdleCmd>) {
+                    auto* m = dst_unit->mutable_select_idle_cmd();
+                    m->set_step(v.step);
+                    m->set_playerid(v.playerid);
+                    return OCG_SAVE_OK;
+                } else if constexpr (std::is_same_v<T, Processors::SelectPlace>) {
+                    auto* m = dst_unit->mutable_select_place();
+                    m->set_step(v.step);
+                    m->set_playerid(v.playerid);
+                    m->set_count(v.count);
+                    m->set_flag(v.flag);
+                    m->set_disable_field(v.disable_field);
+                    return OCG_SAVE_OK;
+                } else if constexpr (std::is_same_v<T, Processors::IdleCommand>) {
+                    auto* m = dst_unit->mutable_idle_command();
+                    m->set_step(v.step);
+                    m->set_phase_to_change_to(v.phase_to_change_to);
+                    m->set_card_to_reposition_handle(
+                        hc_assign_safe(hc, v.card_to_reposition));
+                    return OCG_SAVE_OK;
+                } else if constexpr (std::is_same_v<T, Processors::PhaseEvent>) {
+                    auto* m = dst_unit->mutable_phase_event();
+                    m->set_step(v.step);
+                    m->set_phase(v.phase);
+                    m->set_is_opponent(v.is_opponent);
+                    m->set_priority_passed(v.priority_passed);
+                    return OCG_SAVE_OK;
+                } else {
+                    if (refuse_reason) {
+                        char buf[200];
+                        std::snprintf(buf, sizeof(buf),
+                            "chunk-9a Tier 1 stub: processor unit at "
+                            "index %d is type '%s' (not in "
+                            "Adjust/Turn/SelectIdleCmd/SelectPlace). "
+                            "Tier 2/3 add the remaining variants.",
+                            unit_idx, typeid(T).name());
+                        *refuse_reason = buf;
+                    }
+                    return OCG_SAVE_ERR_REFUSE_UNKNOWN_UPVALUE_TYPE;
+                }
+            }, u);
+        if (status != OCG_SAVE_OK) return status;
+        ++unit_idx;
+    }
+    return OCG_SAVE_OK;
 }
 
 }  // namespace
@@ -363,24 +445,28 @@ OCG_SaveStatus serialize_duel(const duel& d, std::string* out,
     // Still stubbed and refused: ProcessorState (units/subunits), pending
     // chain lists (tpchain/ntpchain/select_chains), full effect+group
     // walks. These land in chunk 5b alongside the Lua closure work.
+    // Chunk 9a Tier 1 lifted the units guard — write_processor below
+    // handles `units` directly (refusing on non-Tier-1 types). Still
+    // refusing on subunits + pending-chain lists here; Tier 2 lifts
+    // those.
     if (d.game_field) {
         const auto& core = d.game_field->core;
-        if (!core.units.empty() || !core.subunits.empty() ||
+        if (!core.subunits.empty() ||
             !core.tpchain.empty() || !core.ntpchain.empty() ||
             !core.select_chains.empty()) {
             *refuse_reason =
-                "chunk-5a stub: ProcessorState (units/subunits) and "
-                "pending-chain lists (tpchain/ntpchain/select_chains) are "
-                "not yet wired into the save path; chunk 5b lands them. "
-                "First fixture that hits this should drive the work.";
+                "chunk-9a Tier 1 stub: subunits / tpchain / ntpchain / "
+                "select_chains are not yet wired into the save path; "
+                "Tier 2 lands them. First fixture that hits this should "
+                "drive the next tier.";
             return OCG_SAVE_ERR_INTERNAL;
         }
     }
     // Chunk 5b Wave 2: effects, groups, card.effect_container refs, and
-    // chain links are all wired now. Lua callbacks dump per plan §13.4
-    // (with per-upvalue refuse for unknown types via plan §13.2 format).
-    // Only ProcessorState (units/subunits) and the pending-chain lists
-    // remain stubbed — those refuse above.
+    // chain links are all wired. Lua callbacks dump per plan §13.4.
+    // Chunk 9a Tier 1: core.units handled by write_processor (Tier 1
+    // types only). Tier 2 expands variant coverage and lifts the
+    // subunits / chain_list refuses above.
 
     // 2. Build handle tables in deterministic order.
     HandleTable<card> ht_cards;
@@ -487,8 +573,13 @@ OCG_SaveStatus serialize_duel(const duel& d, std::string* out,
         }
         write_chain(*d.game_field, state.mutable_chain(),
                     ht_cards, ht_effects, ht_groups);
-        write_processor(d.game_field->core, state.mutable_processor(),
-                        ht_cards, ht_effects, ht_groups);
+        // Chunk 9a Tier 1: write_processor can refuse on non-Tier-1
+        // unit types. Surface the refuse with the format the corpus
+        // measurement expects.
+        OCG_SaveStatus pstatus = write_processor(
+            d.game_field->core, state.mutable_processor(),
+            ht_cards, ht_effects, ht_groups, refuse_reason);
+        if (pstatus != OCG_SAVE_OK) return pstatus;
     }
 
     for (card* c : ht_cards.in_handle_order()) {

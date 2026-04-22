@@ -989,6 +989,85 @@ bool test_chunk5a_msg_stream_baseline_vs_load() {
 }
 
 // ---------------------------------------------------------------------------
+// CHUNK 9a Tier 1: ProcessorState round-trip at a real engine boundary.
+//
+// Drives a vanilla-deck duel through StartDuel + the initial setup MSGs
+// until the engine first awaits a player decision. At that point
+// core.units is non-empty (typically Adjust + Turn + a Select* unit at
+// step 1). Save → load → re-save must be byte-equal.
+//
+// Verifies Tier 1 (Adjust / Turn / SelectIdleCmd / SelectPlace) is
+// sufficient for the dominant ygoenv-reset boundary, and that the
+// round-trip preserves engine state. If the boundary's units stack
+// contains a Tier 2/3 type (e.g. SelectChain, SelectCard), save will
+// refuse with the chunk-9a stub message — that's a signal to expand
+// Tier 1's coverage list.
+// ---------------------------------------------------------------------------
+
+bool test_chunk9a_processor_state_round_trip() {
+    constexpr uint64_t kSeed = 0x9A1E1ULL;
+
+    OCG_Duel orig = make_chunk5a_duel(kSeed);
+    CHECK_TRUE(orig != nullptr, "create orig");
+    populate_simple_deck(orig);
+    OCG_StartDuel(orig);
+    auto stream_orig = drive_to_first_pause(orig);
+    CHECK_TRUE(!stream_orig.empty(),
+               "orig produced non-empty MSG stream pre-pause");
+
+    auto* d_orig = static_cast<duel*>(orig);
+    if (d_orig->game_field != nullptr) {
+        const auto& core = d_orig->game_field->core;
+        std::printf("  9a tier1: post-StartDuel boundary has units=%zu "
+                    "subunits=%zu sel_chains=%zu cur_chain=%zu\n",
+                    core.units.size(), core.subunits.size(),
+                    core.select_chains.size(), core.current_chain.size());
+    }
+
+    void* blob1 = nullptr;
+    uint32_t size1 = 0;
+    int s = OCG_DuelSaveState(orig, &blob1, &size1);
+    if (s != OCG_SAVE_OK) {
+        std::string out, reason;
+        ocg::serialize::serialize_duel(*d_orig, &out, &reason);
+        std::fprintf(stderr,
+            "FAIL: 9a tier1 save status=%d reason=%s\n", s, reason.c_str());
+        OCG_DestroyDuel(orig);
+        return false;
+    }
+    std::printf("  9a tier1: saved %u bytes\n", size1);
+
+    OCG_DuelOptions opts = make_chunk5a_load_options();
+    OCG_Duel loaded = nullptr;
+    CHECK_EQ(OCG_DuelLoadState(blob1, size1, &opts, &loaded), OCG_LOAD_OK,
+             "9a tier1 load");
+
+    void* blob2 = nullptr;
+    uint32_t size2 = 0;
+    CHECK_EQ(OCG_DuelSaveState(loaded, &blob2, &size2), OCG_SAVE_OK,
+             "9a tier1 re-save");
+
+    if (size1 != size2 || std::memcmp(blob1, blob2, size1) != 0) {
+        std::fprintf(stderr,
+            "FAIL: 9a tier1 round-trip blobs differ (size1=%u size2=%u)\n",
+            size1, size2);
+        std::FILE* fp = std::fopen("/tmp/9a_tier1_orig.pb", "wb");
+        if (fp) { std::fwrite(blob1, 1, size1, fp); std::fclose(fp); }
+        fp = std::fopen("/tmp/9a_tier1_loaded.pb", "wb");
+        if (fp) { std::fwrite(blob2, 1, size2, fp); std::fclose(fp); }
+        std::fprintf(stderr,
+            "  blobs dumped to /tmp/9a_tier1_{orig,loaded}.pb\n");
+        OCG_FreeSaveBuffer(blob1); OCG_FreeSaveBuffer(blob2);
+        OCG_DestroyDuel(orig); OCG_DestroyDuel(loaded);
+        return false;
+    }
+
+    OCG_FreeSaveBuffer(blob1); OCG_FreeSaveBuffer(blob2);
+    OCG_DestroyDuel(orig); OCG_DestroyDuel(loaded);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // CHUNK 5b Wave 1: card schema extensions for effect-targeting load-stability
 // (clarification #3). Mutate effect_target_cards / effect_target_owner /
 // material_cards on a save-side duel, save → load → save, assert byte-equal
@@ -1652,6 +1731,9 @@ int main() {
         {"chunk5a_card_round_trip", &test_chunk5a_card_round_trip},
         {"chunk5a_msg_stream_baseline_vs_load",
          &test_chunk5a_msg_stream_baseline_vs_load},
+        // Chunk 9a Tier 1 — ProcessorState round-trip at engine boundary
+        {"chunk9a_processor_state_round_trip",
+         &test_chunk9a_processor_state_round_trip},
         // Chunk 5b Wave 1 — card_set fields for effect-targeting
         {"chunk5b_card_set_round_trip", &test_chunk5b_card_set_round_trip},
         // Chunk 5b Wave 3 — Type-C fixtures (byte-equal round-trip)

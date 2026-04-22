@@ -285,6 +285,17 @@ void walk_table_for_c_functions(
                 if (key_str[0] == 'c' && key_str[1] >= '0' && key_str[1] <= '9') {
                     skip = true;
                 }
+                // Skip metatable internals (__index, __newindex, ...).
+                // These create cycles back through the parent namespace
+                // (e.g. Card.__index.__index.IsLocation) and produce
+                // non-deterministic c_function_name resolution depending
+                // on lua_next iteration order — same pointer reachable
+                // via multiple paths, first one wins. Surfaced after
+                // chunk-5c-A landed; canonical names are the short
+                // qualified ones, never the metatable-walked versions.
+                if (key_str[0] == '_' && key_str[1] == '_') {
+                    skip = true;
+                }
                 // Avoid double-walking core globals to prevent the
                 // registry-explosion from _G recursion through itself
                 // (e.g. _G._G or package.loaded.<self>).

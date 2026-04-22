@@ -409,25 +409,86 @@ message ProcessorState {
     repeated ProcessorUnit units = 1;
     repeated ProcessorUnit subunits = 2;
 
-    // Selection / decision context that survives MSG boundaries
-    uint32 select_min = 10;
-    uint32 select_max = 11;
-    bool select_cancelable = 12;
-    uint64 select_hint = 13;
-    repeated uint32 select_card_handles = 14;
+    // Selection / decision context that survives MSG boundaries.
+    // Pre-9a these were generic placeholders; chunk 9a's per-type
+    // ProcessorUnit oneof captures the real selection state inside each
+    // unit, so these stay reserved for now.
+    reserved 10, 11, 12, 13, 14;
+    reserved "select_min", "select_max", "select_cancelable",
+             "select_hint", "select_card_handles";
 }
 
+// Chunk 9a: per-type ProcessorUnit messages mirror the
+// std::variant<P::Adjust, P::Turn, ...> in ocgcore/processor_unit.h.
+// Tier 1 covers Adjust / Turn / SelectIdleCmd / SelectPlace — the
+// dominant types observed at envpool reset boundaries (§14.1). Tier
+// 2/3 add the remaining ~76 types.
+//
+// Pre-9a there was a single generic ProcessorUnit { unit_type, step,
+// arg1..4, ptr1..2 } message. That shape didn't match the actual
+// variant structure — fields renumbered into a oneof here. Old fields
+// (1-10) moved to `reserved` so any old blob fails parsing cleanly
+// rather than silently mis-decoding.
 message ProcessorUnit {
-    uint32 unit_type = 1;
-    int32 step = 2;
-    int32 peffect_handle = 3;         // → EffectRecord
-    uint32 ptarget_handle = 4;        // → GroupRecord
-    int64 arg1 = 5;
-    int64 arg2 = 6;
-    int64 arg3 = 7;
-    int64 arg4 = 8;
-    int64 ptr1 = 9;                   // raw int from processor.h's int_ptr*
-    int64 ptr2 = 10;
+    reserved 1, 2, 3, 4, 5, 6, 7, 8, 9, 10;
+    reserved "unit_type", "step", "peffect_handle", "ptarget_handle",
+             "arg1", "arg2", "arg3", "arg4", "ptr1", "ptr2";
+
+    oneof unit {
+        // ── Tier 1 ──────────────────────────────────────────────────
+        ProcAdjust         adjust          = 100;
+        ProcTurn           turn            = 101;
+        ProcSelectIdleCmd  select_idle_cmd = 102;
+        ProcSelectPlace    select_place    = 103;
+        // §14.1 probe only captured units.front(); first Tier 1 fixture
+        // surfaced IdleCommand under SelectIdleCmd in the stack —
+        // measurement-driven Tier 1 expansion per user directive.
+        ProcIdleCommand    idle_command    = 104;
+        ProcPhaseEvent     phase_event     = 105;
+        // Tier 2/3 variants add their own field numbers when landed.
+    }
+}
+
+// All Process<NA>-derived types share `step` (uint16_t in C++).
+// Tier 1 messages encode it as uint32 here (proto3 doesn't have uint16).
+
+message ProcAdjust {
+    uint32 step = 1;
+}
+
+message ProcTurn {
+    uint32 step = 1;
+    uint32 turn_player = 2;                          // uint8 in C++
+    bool has_performed_second_battle_phase = 3;
+}
+
+message ProcSelectIdleCmd {
+    uint32 step = 1;
+    uint32 playerid = 2;                             // uint8 in C++
+}
+
+message ProcSelectPlace {
+    uint32 step = 1;
+    uint32 playerid = 2;                             // uint8 in C++
+    uint32 count = 3;                                // uint8 in C++
+    uint32 flag = 4;                                 // uint32 in C++
+    bool disable_field = 5;
+}
+
+// IdleCommand: framing context for SelectIdleCmd. Holds a card pointer
+// (card_to_reposition) which serializes via card_handle.
+message ProcIdleCommand {
+    uint32 step = 1;
+    uint32 phase_to_change_to = 2;                   // uint8 in C++
+    uint32 card_to_reposition_handle = 3;            // 0 = nullptr
+}
+
+// PhaseEvent: phase-transition framing.
+message ProcPhaseEvent {
+    uint32 step = 1;
+    uint32 phase = 2;                                // uint16 in C++
+    bool is_opponent = 3;
+    bool priority_passed = 4;
 }
 
 // ---------------------------------------------------------------------------
