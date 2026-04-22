@@ -381,19 +381,12 @@ OCG_LoadStatus deserialize_duel(const void* buffer, std::size_t size,
         d->set_rng_state(s);
     }
 
-    // Chunk-5b Wave 2 fail-loud: lua.closures is the legacy
-    // ClosureRegistration array. Chunk 5b uses per-effect LuaCallback
-    // bytecode dump (EffectRecord.*_callback) instead, so closures
-    // should always be empty.
-    if (state.lua().closures_size() != 0) {
-        delete d;
-        *load_error =
-            "load: state.lua.closures is non-empty. Chunk 5b uses "
-            "per-effect LuaCallback bytecode dump (EffectRecord.*_callback) "
-            "instead of the LuaReconstruction.closures path. A blob with "
-            "lua.closures populated came from a different save mechanism.";
-        return OCG_LOAD_ERR_INTERNAL;
-    }
+    // Chunk-5b Wave 3: lua.closures fail-loud lifted. The legacy
+    // ClosureRegistration array (LuaReconstruction.closures) is no longer
+    // populated by the saver — chunk 5b uses per-effect LuaCallback
+    // bytecode dump on EffectRecord.*_callback instead. Field is left
+    // in the schema (unread) for blob backward-compatibility; loader
+    // simply ignores its contents.
 
     // 9-pass walk per plan §13.3. Functions named by dependency to make
     // ordering structural rather than comment-only. Debug asserts at

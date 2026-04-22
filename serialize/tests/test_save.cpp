@@ -1113,20 +1113,37 @@ struct ScriptedCard {
     int32_t defense;
 };
 
+// Type/location/pos constants per src/ygopro-scripts/constant.lua.
+// (Repeated here so this test stays self-contained — the engine doesn't
+// expose them via a C header.)
+constexpr uint32_t kTypeMonster    = 0x1;
+constexpr uint32_t kTypeSpell      = 0x2;
+constexpr uint32_t kTypeEffect     = 0x20;
+constexpr uint32_t kTypeRitual     = 0x80;
+constexpr uint32_t kTypeContinuous = 0x20000;
+constexpr uint32_t kTypeField      = 0x80000;
+
 constexpr ScriptedCard kScriptedCards[] = {
-    // Dueltaining — TYPE_SPELL (0x2) + TYPE_FIELD (0x80). Field Spell.
-    // Its initial_effect registers s.spcon(0), s.drop(0), s.btcon(0/1),
-    // s.chcon(0/1), s.damcon(0/1) — all integer-capture Type-C closures.
-    {19162134, 0x2 | 0x80, 0, 0, 0, 0, 0},
+    // Dueltaining (c19162134) — Field Spell. initial_effect registers
+    // s.spcon(0)/s.drop(0)/s.btcon(0/1)/s.chcon(0/1)/s.damcon(0/1) — all
+    // integer-capture Type-C closures.
+    {19162134, kTypeSpell | kTypeField, 0, 0, 0, 0, 0},
 
-    // c14220547 — Royal Magical Library or similar; uses
-    // s.condition(TYPE_RITUAL) / s.condition(TYPE_FUSION). Integer
-    // constant captures via Lua-evaluated TYPE_* globals.
-    // TYPE_SPELL + TYPE_QUICKPLAY (0x10000)? Look up in .lua header.
-    {14220547, 0x2 | 0x10000, 0, 0, 0, 0, 0},
+    // Branded in Central Dogmatika (c14220547) — Continuous Spell. Two
+    // Type-C closures via s.condition(TYPE_RITUAL) and s.condition(TYPE_FUSION).
+    // Inner closure has integer `typ` upvalue.
+    {14220547, kTypeSpell | kTypeContinuous, 0, 0, 0, 0, 0},
 
-    // c30339825 — uses s.sptg(true) / s.sptg(false). Bool captures.
-    {30339825, 0x2 | 0x4, 0, 0, 0, 0, 0},  // Spell+Continuous (0x4) guess
+    // Hydor, the Base of All Things (c30339825) — Effect Monster. Type-C
+    // closures via s.sptg(true|false) / s.spop(true|false). Inner closure
+    // has boolean `water` upvalue.
+    {30339825, kTypeMonster | kTypeEffect, 4, 0x8 /*ATTR_WATER*/, 0, 1500, 1500},
+
+    // Vendread Reunion (c2266498) — Ritual Spell. Wrapper-sequencing
+    // fixture: s.registerloccount(func) wraps target/operation in an outer
+    // closure whose upvalue is the inner closure produced by Ritual.CreateProc.
+    // Function-typed upvalue exercises the §13.4 refuse path (UNKNOWN type).
+    {2266498, kTypeSpell | kTypeRitual, 0, 0, 0, 0, 0},
 };
 
 void scripted_card_reader(void* /*payload*/, uint32_t code,
@@ -1228,56 +1245,48 @@ OCG_DuelOptions make_scripted_load_options() {
 }
 
 // ---------------------------------------------------------------------------
-// Type-C fixture #1: Dueltaining (c19162134) — genuine Type-C-as-callback,
-// integer captures via s.spcon(0) / s.drop(0) / s.btcon(0/1) / etc.
+// Type-C fixture round-trip helper.
+//
+// Pattern: scripted_duel + DuelNewCard (which fires initial_effect and
+// registers Type-C closures) → save → load → re-save → assert byte-equal.
+// On byte-equal failure, dumps both blobs to /tmp/<tag>_{orig,loaded}.pb
+// for external `protoc --decode_raw` diagnosis.
+//
+// On save refusal, calls serialize_duel directly to recover the
+// refuse_reason (the C API drops it).
 // ---------------------------------------------------------------------------
-
-bool test_chunk5b_dueltaining_round_trip() {
-    OCG_Duel orig = make_scripted_duel(0x5BD1);
+bool scripted_round_trip(const char* tag, uint32_t code,
+                         uint32_t loc, uint32_t seq, uint32_t pos,
+                         uint64_t seed_lo) {
+    OCG_Duel orig = make_scripted_duel(seed_lo);
     CHECK_TRUE(orig != nullptr, "create orig");
 
-    // Add Dueltaining as a card. Its initial_effect runs at new_card time
-    // (interpreter.cpp:94), registering ~10 effects with Type-C closures.
     OCG_NewCardInfo info{};
     info.team = 0;
     info.duelist = 0;
-    info.code = 19162134;  // Dueltaining
+    info.code = code;
     info.con = 0;
-    info.loc = 0x10;       // LOCATION_SZONE
-    info.seq = 5;          // field-zone slot
-    info.pos = 0x05;       // POS_FACEUP_ATTACK
+    info.loc = loc;
+    info.seq = seq;
+    info.pos = pos;
     OCG_DuelNewCard(orig, &info);
 
     auto* d_orig = static_cast<duel*>(orig);
     const size_t effect_count = d_orig->effects.size();
-    CHECK_TRUE(effect_count > 0,
-               "Dueltaining initial_effect registered effects");
-    std::printf("  Dueltaining registered %zu effects, %zu cards, %zu groups\n",
-                effect_count, d_orig->cards.size(), d_orig->groups.size());
-    // Diagnostic: list all cards and their codes
-    for (card* c : d_orig->cards) {
-        std::printf("    card@%p code=%u cardid=%u\n",
-                    static_cast<void*>(c), c ? c->data.code : 0,
-                    c ? c->cardid : 0);
-    }
+    CHECK_TRUE(effect_count > 0, "initial_effect registered effects");
+    std::printf("  %s: %zu effects, %zu cards, %zu groups\n",
+                tag, effect_count, d_orig->cards.size(), d_orig->groups.size());
 
     void* blob1 = nullptr;
     uint32_t size1 = 0;
     int s = OCG_DuelSaveState(orig, &blob1, &size1);
     if (s != OCG_SAVE_OK) {
         std::fprintf(stderr,
-            "FAIL: save returned status=%d on Dueltaining duel\n", s);
-        // Dump the engine's serialize_duel refuse_reason via a private
-        // hook — or, since the C API loses it, run save again into our
-        // own serialize_duel call where we can read the reason directly.
-        std::string reason;
-        ocg::serialize::serialize_duel(*static_cast<duel*>(orig),
-                                        nullptr ? nullptr : &reason,
-                                        &reason);
-        // Note: serialize_duel signature is (duel, out, refuse_reason);
-        // pass a string for both since out is required.
-        std::string out;
-        ocg::serialize::serialize_duel(*static_cast<duel*>(orig), &out, &reason);
+            "FAIL: %s save returned status=%d\n", tag, s);
+        // Re-run via the C++ entry point to recover the refuse_reason
+        // (the C API doesn't surface it).
+        std::string out, reason;
+        ocg::serialize::serialize_duel(*d_orig, &out, &reason);
         std::fprintf(stderr, "  refuse_reason: %s\n", reason.c_str());
         OCG_DestroyDuel(orig);
         return false;
@@ -1286,7 +1295,7 @@ bool test_chunk5b_dueltaining_round_trip() {
     OCG_DuelOptions opts = make_scripted_load_options();
     OCG_Duel loaded = nullptr;
     int ls = OCG_DuelLoadState(blob1, size1, &opts, &loaded);
-    CHECK_EQ(ls, OCG_LOAD_OK, "load Dueltaining duel");
+    CHECK_EQ(ls, OCG_LOAD_OK, "load");
 
     void* blob2 = nullptr;
     uint32_t size2 = 0;
@@ -1295,15 +1304,19 @@ bool test_chunk5b_dueltaining_round_trip() {
 
     if (size1 != size2 || std::memcmp(blob1, blob2, size1) != 0) {
         std::fprintf(stderr,
-            "FAIL: Dueltaining round-trip blobs differ (size1=%u size2=%u)\n",
-            size1, size2);
-        // Dump both blobs to disk for external diagnosis.
-        std::FILE* fp = std::fopen("/tmp/dueltaining_orig.pb", "wb");
-        if (fp) { std::fwrite(blob1, 1, size1, fp); std::fclose(fp); }
-        fp = std::fopen("/tmp/dueltaining_loaded.pb", "wb");
-        if (fp) { std::fwrite(blob2, 1, size2, fp); std::fclose(fp); }
+            "FAIL: %s round-trip blobs differ (size1=%u size2=%u)\n",
+            tag, size1, size2);
+        char path[256];
+        std::snprintf(path, sizeof(path), "/tmp/%s_orig.pb", tag);
+        if (auto* fp = std::fopen(path, "wb")) {
+            std::fwrite(blob1, 1, size1, fp); std::fclose(fp);
+        }
+        std::snprintf(path, sizeof(path), "/tmp/%s_loaded.pb", tag);
+        if (auto* fp = std::fopen(path, "wb")) {
+            std::fwrite(blob2, 1, size2, fp); std::fclose(fp);
+        }
         std::fprintf(stderr,
-            "  blobs dumped to /tmp/dueltaining_{orig,loaded}.pb\n");
+            "  blobs dumped to /tmp/%s_{orig,loaded}.pb\n", tag);
         OCG_FreeSaveBuffer(blob1); OCG_FreeSaveBuffer(blob2);
         OCG_DestroyDuel(orig); OCG_DestroyDuel(loaded);
         return false;
@@ -1312,6 +1325,209 @@ bool test_chunk5b_dueltaining_round_trip() {
     OCG_FreeSaveBuffer(blob1); OCG_FreeSaveBuffer(blob2);
     OCG_DestroyDuel(orig); OCG_DestroyDuel(loaded);
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Type-C fixture #1: Dueltaining (c19162134) — Field Spell. Integer
+// captures via s.spcon(0) / s.drop(0) / s.btcon(0/1) / s.chcon(0/1) /
+// s.damcon(0/1).
+// ---------------------------------------------------------------------------
+bool test_chunk5b_dueltaining_round_trip() {
+    constexpr uint32_t LOC_SZONE = 0x8;       // per constant.lua
+    constexpr uint32_t POS_FACEUP_ATK = 0x1;  // per constant.lua
+    return scripted_round_trip("dueltaining", 19162134,
+                               LOC_SZONE, /*seq=*/5, POS_FACEUP_ATK, 0x5BD1);
+}
+
+// ---------------------------------------------------------------------------
+// Type-C fixture #2: Branded in Central Dogmatika (c14220547) — Continuous
+// Spell. Integer captures via s.condition(TYPE_RITUAL) and
+// s.condition(TYPE_FUSION). Inner closure has integer `typ` upvalue.
+// ---------------------------------------------------------------------------
+bool test_chunk5b_branded_round_trip() {
+    constexpr uint32_t LOC_SZONE = 0x8;
+    constexpr uint32_t POS_FACEUP_ATK = 0x1;
+    return scripted_round_trip("branded", 14220547,
+                               LOC_SZONE, /*seq=*/0, POS_FACEUP_ATK, 0x5BD2);
+}
+
+// ---------------------------------------------------------------------------
+// Type-C fixture #3: Hydor, the Base of All Things (c30339825) — Effect
+// Monster. Boolean captures via s.sptg(true|false) / s.spop(true|false).
+// Inner closure has boolean `water` upvalue.
+// ---------------------------------------------------------------------------
+bool test_chunk5b_hydor_round_trip() {
+    // initial_effect registers e1 (EFFECT_TYPE_ACTIVATE — defaults to hand
+    // range for monsters) and e2 (EFFECT_TYPE_IGNITION with
+    // SetRange(LOCATION_GRAVE)). Place in hand so e1 is in-range; both
+    // effects register regardless.
+    constexpr uint32_t LOC_HAND = 0x2;
+    constexpr uint32_t POS_FACEUP_ATK = 0x1;
+    return scripted_round_trip("hydor", 30339825,
+                               LOC_HAND, /*seq=*/0, POS_FACEUP_ATK, 0x5BD3);
+}
+
+// ---------------------------------------------------------------------------
+// Wrapper-sequencing fixture: Vendread Reunion (c2266498) — Ritual Spell.
+//
+// s.registerloccount(func) returns a closure whose upvalue is the
+// `func` parameter — a function. Per §13.4 design, function-typed
+// upvalues are not in the supported classify_upvalue set: they fall
+// through to UNKNOWN, which produces OCG_SAVE_ERR_REFUSE_UNKNOWN_UPVALUE_TYPE
+// with an informative refuse_reason (per §13.2 format).
+//
+// This test asserts that path: save refuses cleanly with the expected
+// status code AND a refuse_reason that names "function" as the upvalue
+// type and identifies the offending effect/slot/upvalue index. It does
+// NOT round-trip the blob — that would require recursive function-upvalue
+// dump support, deferred beyond chunk 5b per §13.4.
+// ---------------------------------------------------------------------------
+bool test_chunk5b_vendread_wrapper_refuse() {
+    OCG_Duel orig = make_scripted_duel(0x5BD4);
+    CHECK_TRUE(orig != nullptr, "create orig");
+
+    OCG_NewCardInfo info{};
+    info.team = 0;
+    info.duelist = 0;
+    info.code = 2266498;  // Vendread Reunion
+    info.con = 0;
+    info.loc = 0x2;       // LOCATION_HAND
+    info.seq = 0;
+    info.pos = 0x1;       // POS_FACEUP_ATTACK
+    OCG_DuelNewCard(orig, &info);
+
+    auto* d_orig = static_cast<duel*>(orig);
+    std::printf("  vendread: %zu effects, %zu cards, %zu groups\n",
+                d_orig->effects.size(), d_orig->cards.size(),
+                d_orig->groups.size());
+    CHECK_TRUE(d_orig->effects.size() > 0,
+               "Vendread Reunion initial_effect registered effects");
+
+    // Save via the C++ entry point so we can inspect refuse_reason.
+    std::string out, reason;
+    auto status = ocg::serialize::serialize_duel(*d_orig, &out, &reason);
+
+    if (status == OCG_SAVE_OK) {
+        std::fprintf(stderr,
+            "FAIL: vendread expected refuse on function upvalue, got OK\n");
+        OCG_DestroyDuel(orig);
+        return false;
+    }
+
+    CHECK_EQ(status, OCG_SAVE_ERR_REFUSE_UNKNOWN_UPVALUE_TYPE,
+             "vendread refuses with UNKNOWN_UPVALUE_TYPE");
+    std::printf("  vendread refuse_reason: %s\n", reason.c_str());
+
+    // Refuse-reason content sanity per §13.2: must name the offending
+    // upvalue type ("function") and identify effect_id/slot/upvalue index.
+    CHECK_TRUE(reason.find("function") != std::string::npos,
+               "refuse_reason mentions 'function' type");
+    CHECK_TRUE(reason.find("effect") != std::string::npos ||
+               reason.find("upvalue") != std::string::npos,
+               "refuse_reason mentions effect/upvalue context");
+
+    OCG_DestroyDuel(orig);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// MSG-stream verification helper for Type-C fixtures.
+//
+// Sequence:
+//   1. Control C: scripted_duel + DuelNewCard + StartDuel + drive to first
+//      pause; capture MSG stream.
+//   2. Original A: scripted_duel + DuelNewCard + save (pre-StartDuel).
+//   3. Loaded B: load A's blob + StartDuel + drive to first pause; capture
+//      MSG stream.
+//   4. Assert C's stream == B's stream byte-for-byte.
+//
+// Proves: bytecode-restored Type-C closures actually execute correctly
+// post-load (not just that the blob round-trips byte-equal).
+// ---------------------------------------------------------------------------
+bool scripted_msg_stream_verify(const char* tag, uint32_t code,
+                                uint32_t loc, uint32_t seq, uint32_t pos,
+                                uint64_t seed_lo) {
+    auto build_with_card = [&](OCG_Duel d) {
+        OCG_NewCardInfo info{};
+        info.team = 0;
+        info.duelist = 0;
+        info.code = code;
+        info.con = 0;
+        info.loc = loc;
+        info.seq = seq;
+        info.pos = pos;
+        OCG_DuelNewCard(d, &info);
+    };
+
+    // Control: build + start + drive
+    OCG_Duel control = make_scripted_duel(seed_lo);
+    CHECK_TRUE(control != nullptr, "create control");
+    build_with_card(control);
+    OCG_StartDuel(control);
+    auto stream_control = drive_to_first_pause(control);
+
+    // Original: build + save (pre-StartDuel, same as chunk-5a pattern to
+    // avoid the processor-state fail-loud).
+    OCG_Duel orig = make_scripted_duel(seed_lo);
+    CHECK_TRUE(orig != nullptr, "create orig");
+    build_with_card(orig);
+    void* blob = nullptr;
+    uint32_t size = 0;
+    CHECK_EQ(OCG_DuelSaveState(orig, &blob, &size), OCG_SAVE_OK,
+             "save orig pre-StartDuel");
+
+    // Loaded: load + start + drive
+    OCG_DuelOptions opts = make_scripted_load_options();
+    OCG_Duel loaded = nullptr;
+    CHECK_EQ(OCG_DuelLoadState(blob, size, &opts, &loaded), OCG_LOAD_OK,
+             "load");
+    OCG_StartDuel(loaded);
+    auto stream_loaded = drive_to_first_pause(loaded);
+
+    CHECK_TRUE(!stream_control.empty(),
+               "control produced non-empty MSG stream");
+    if (stream_control.size() != stream_loaded.size() ||
+        stream_control != stream_loaded) {
+        std::fprintf(stderr,
+            "FAIL: %s MSG stream divergence: control=%zu bytes, "
+            "loaded=%zu bytes\n", tag,
+            stream_control.size(), stream_loaded.size());
+        for (size_t i = 0; i < stream_control.size() &&
+                            i < stream_loaded.size(); ++i) {
+            if (stream_control[i] != stream_loaded[i]) {
+                std::fprintf(stderr,
+                    "  first diff at byte %zu: control=0x%02x loaded=0x%02x\n",
+                    i, stream_control[i], stream_loaded[i]);
+                break;
+            }
+        }
+        OCG_FreeSaveBuffer(blob);
+        OCG_DestroyDuel(orig);
+        OCG_DestroyDuel(control);
+        OCG_DestroyDuel(loaded);
+        return false;
+    }
+
+    OCG_FreeSaveBuffer(blob);
+    OCG_DestroyDuel(orig);
+    OCG_DestroyDuel(control);
+    OCG_DestroyDuel(loaded);
+    return true;
+}
+
+bool test_chunk5b_dueltaining_msg_stream() {
+    return scripted_msg_stream_verify("dueltaining", 19162134,
+                                       0x8, 5, 0x1, 0x5BD1);
+}
+
+bool test_chunk5b_branded_msg_stream() {
+    return scripted_msg_stream_verify("branded", 14220547,
+                                       0x8, 0, 0x1, 0x5BD2);
+}
+
+bool test_chunk5b_hydor_msg_stream() {
+    return scripted_msg_stream_verify("hydor", 30339825,
+                                       0x2, 0, 0x1, 0x5BD3);
 }
 
 // ---------------------------------------------------------------------------
@@ -1356,8 +1572,17 @@ int main() {
          &test_chunk5a_msg_stream_baseline_vs_load},
         // Chunk 5b Wave 1 — card_set fields for effect-targeting
         {"chunk5b_card_set_round_trip", &test_chunk5b_card_set_round_trip},
-        // Chunk 5b Wave 3 — Type-C fixtures
+        // Chunk 5b Wave 3 — Type-C fixtures (byte-equal round-trip)
         {"chunk5b_dueltaining_round_trip", &test_chunk5b_dueltaining_round_trip},
+        {"chunk5b_branded_round_trip",     &test_chunk5b_branded_round_trip},
+        {"chunk5b_hydor_round_trip",       &test_chunk5b_hydor_round_trip},
+        // Chunk 5b Wave 3 — wrapper-sequencing refuse path
+        {"chunk5b_vendread_wrapper_refuse",
+         &test_chunk5b_vendread_wrapper_refuse},
+        // Chunk 5b Wave 3 — MSG-stream verification (callbacks fire post-load)
+        {"chunk5b_dueltaining_msg_stream", &test_chunk5b_dueltaining_msg_stream},
+        {"chunk5b_branded_msg_stream",     &test_chunk5b_branded_msg_stream},
+        {"chunk5b_hydor_msg_stream",       &test_chunk5b_hydor_msg_stream},
         // Chunk 4 perf scaffold (informational; not gated)
         {"perf_scaffold_vanilla", &test_perf_scaffold_vanilla},
     };
