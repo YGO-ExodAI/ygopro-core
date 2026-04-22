@@ -116,19 +116,41 @@ public:
 		return read_script_callback(read_script_payload, this, name);
 	}
 
-	// ExodAI Phase P1 Primitive 1 (chunk 3): RNG state accessor for
-	// serialization. The Xoshiro state is the only piece of randomness
-	// in the engine (deck shuffle, coin flip, dice, effect RNG all draw
-	// from this single stream); the serializer captures it as 4×uint64.
+	// ===================================================================
+	// SERIALIZATION_API — ExodAI Phase P1 Primitive 1
+	// ===================================================================
+	// Narrow accessors that exist solely so save_state.cpp / load_state.cpp
+	// can reach internal state without making large field sets public. Each
+	// is a one-liner that exposes existing private state for read or
+	// targeted write; none change engine behavior.
+	//
+	// Intended consumers: ocgcore/serialize/*. General-purpose engine code
+	// should NOT use these — engine code paths already have direct access
+	// to `random` (and any future fields here). If you find yourself
+	// reaching for one of these from inside ocgcore proper, the right
+	// answer is usually to add a friend or a different abstraction; these
+	// accessors are scoped to serialization only.
+	//
+	// The SERIALIZATION_API set will grow across chunks 5-7. When the
+	// chunk-7 fork SHA bumps land, this block becomes the canonical home
+	// for "yes, serialization needs this; no, this isn't general API."
+
+	// chunk 3: RNG state read for save. The Xoshiro state is the only
+	// piece of randomness (deck shuffle, coin flip, dice, effect RNG all
+	// draw from this single stream); the serializer captures it as
+	// 4×uint64.
 	const RNG::Xoshiro256StarStar& get_rng() const { return random; }
 
-	// ExodAI Phase P1 Primitive 1 (chunk 4): RNG state setter for the
-	// load path. Replaces the current Xoshiro state with the saved state
-	// during deserialization. Caller is responsible for ensuring the
-	// duel is in a well-defined state otherwise.
+	// chunk 4: RNG state write for load. Replaces the current Xoshiro
+	// state with the saved state during deserialization. Caller is
+	// responsible for ensuring the duel is in a well-defined state
+	// otherwise.
 	void set_rng_state(const RNG::Xoshiro256StarStar::StateType& s) {
 		random = RNG::Xoshiro256StarStar(s);
 	}
+	// ===================================================================
+	// END SERIALIZATION_API
+	// ===================================================================
 private:
 	std::deque<duel_message> messages;
 	RNG::Xoshiro256StarStar random;

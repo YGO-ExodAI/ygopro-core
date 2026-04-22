@@ -192,6 +192,33 @@ message CardRecord {
     repeated uint32 equip_cards = 41;       // card handles
     repeated uint32 overlay_cards = 42;     // card handles (xyz materials)
     repeated CardRelation relations = 43;
+
+    // Chunk 5a: minimum scalar fields needed to round-trip vanilla cards.
+    // The CardData struct itself isn't saved — load re-derives it from
+    // card.code via the host's cardReader callback (same data the engine
+    // pulled at original new_card time). What we DO need here are the
+    // per-card scalars not in card_state.
+    uint32 owner = 50;                      // uint8 in C++ (PLAYER_NONE = 2)
+    uint32 cardid = 51;                     // engine-assigned unique id
+    uint32 fieldid = 52;
+    uint32 fieldid_r = 53;
+    uint32 turnid = 54;                     // uint16 in C++
+    uint32 turn_counter = 55;               // uint16 in C++
+    uint32 status = 56;                     // card.status flags
+    uint32 cover = 57;
+    uint32 spsummon_code = 58;
+
+    // Additional pointer cross-references beyond equiping_target.
+    uint32 pre_equip_target_handle = 60;
+    uint32 overlay_target_handle = 61;
+    uint32 pre_overlay_target_handle = 62;
+
+    // Canonical card identity. card.data.code is the konami-id passed to
+    // duel.new_card(); card_state.code can differ if the card has been
+    // re-identified mid-game (rare, e.g. effects that swap identity).
+    // Both are saved so load can call new_card(data_code) and then
+    // restore current.code on top.
+    uint32 data_code = 70;
 }
 
 message CardRelation {

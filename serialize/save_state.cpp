@@ -123,6 +123,9 @@ void write_card_record(const card& src, pb::CardRecord* dst,
     }
 
     dst->set_equip_target_handle(hc.assign(src.equiping_target));
+    dst->set_pre_equip_target_handle(hc.assign(src.pre_equip_target));
+    dst->set_overlay_target_handle(hc.assign(src.overlay_target));
+    dst->set_pre_overlay_target_handle(hc.assign(src.pre_overlay_target));
     // equiping_cards / xyz_materials → repeated handles. Sort by cardid
     // for stable output (card_set is unordered_set).
     {
@@ -146,6 +149,18 @@ void write_card_record(const card& src, pb::CardRecord* dst,
             r->set_relation_flags(kv.second);
         }
     }
+
+    // Chunk 5a scalars beyond card_state.
+    dst->set_owner(src.owner);
+    dst->set_cardid(src.cardid);
+    dst->set_fieldid(src.fieldid);
+    dst->set_fieldid_r(src.fieldid_r);
+    dst->set_turnid(src.turnid);
+    dst->set_turn_counter(src.turn_counter);
+    dst->set_status(src.status);
+    dst->set_cover(src.cover);
+    dst->set_spsummon_code(src.spsummon_code);
+    dst->set_data_code(src.data.code);  // canonical id; load passes to new_card
 }
 
 void write_effect_record(const effect& src, pb::EffectRecord* dst,
@@ -265,27 +280,56 @@ OCG_SaveStatus serialize_duel(const duel& d, std::string* out,
         }
     }
 
-    // 1b. Fail-loud on chunks-3/4 stubs (per chunk-4 user decision: option 1
-    // "fail-loud is cheaper than remembering"). The processor and pending-
-    // chain writers are no-ops; if the state is non-empty we'd silently
-    // drop it. Refuse with a clear reason so the first non-vanilla fixture
-    // that hits this errors instead of silently corrupting state.
+    // 1b. Fail-loud on remaining stubs (per chunk-4 user decision:
+    // "fail-loud is cheaper than remembering"). Subtrees the current
+    // walks don't handle refuse explicitly so the first fixture that
+    // hits one errors clearly instead of silently dropping state.
     //
-    // current_chain (the active chain stack) IS handled by chunk 3's
-    // write_chain_link, so it's not in this check. The list below is
-    // exactly the set of subtrees still stubbed in save_state.cpp's
-    // write_chain / write_processor.
+    // Lifted in chunk 5a: cards and current_chain (chunk 3 already wrote
+    // current_chain, chunk 5a adds load + extends save fields). Lifted
+    // in chunk 5b: effects, groups, lua.closures.
+    //
+    // Still stubbed and refused: ProcessorState (units/subunits), pending
+    // chain lists (tpchain/ntpchain/select_chains), full effect+group
+    // walks. These land in chunk 5b alongside the Lua closure work.
     if (d.game_field) {
         const auto& core = d.game_field->core;
         if (!core.units.empty() || !core.subunits.empty() ||
             !core.tpchain.empty() || !core.ntpchain.empty() ||
             !core.select_chains.empty()) {
             *refuse_reason =
-                "chunk-3/4 stub: ProcessorState (units/subunits) and "
+                "chunk-5a stub: ProcessorState (units/subunits) and "
                 "pending-chain lists (tpchain/ntpchain/select_chains) are "
-                "not yet wired into the save path; chunk 5 lands them. "
-                "First non-vanilla fixture that hits this should drive the "
-                "implementation work.";
+                "not yet wired into the save path; chunk 5b lands them. "
+                "First fixture that hits this should drive the work.";
+            return OCG_SAVE_ERR_INTERNAL;
+        }
+    }
+    // Chunk 5a: refuse if effects or groups are non-empty. These are
+    // chunk-5b deliverables; chunk-5a vanilla fixtures (cards in zones,
+    // pre-StartDuel) have empty effect/group sets. Card.effect_container
+    // refs are written in write_card_record but the EffectRecord array
+    // itself stays empty; if a card has any effect ref, it points to a
+    // nonexistent handle, which load would correctly catch. Better to
+    // refuse here than emit broken cross-references.
+    {
+        bool any_card_has_effect = false;
+        for (card* c : d.cards) {
+            if (c == nullptr) continue;
+            if (!c->single_effect.empty() || !c->field_effect.empty() ||
+                !c->equip_effect.empty() || !c->target_effect.empty() ||
+                !c->xmaterial_effect.empty()) {
+                any_card_has_effect = true;
+                break;
+            }
+        }
+        if (!d.effects.empty() || !d.groups.empty() || any_card_has_effect) {
+            *refuse_reason =
+                "chunk-5a stub: card effects/groups walks are chunk-5b "
+                "work. This blob has registered effects, groups, or cards "
+                "with non-empty effect_containers. Chunk-5a vanilla "
+                "fixtures must be pre-StartDuel with vanilla (no-script) "
+                "cards only.";
             return OCG_SAVE_ERR_INTERNAL;
         }
     }

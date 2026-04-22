@@ -689,6 +689,303 @@ bool test_perf_scaffold_vanilla() {
 }
 
 // ---------------------------------------------------------------------------
+// CHUNK 5a: vanilla-monster fixtures (real card data + zone population +
+// MSG-stream test)
+// ---------------------------------------------------------------------------
+
+// Hardcoded card-data table for the chunk-5a test fixture. Three vanilla
+// normal monsters — no scripts to load, no effects to register, simplest
+// possible card semantics. Data values are illustrative, not pulled from
+// the real cards.cdb (consistency between save and load is what matters
+// for the chunk-5a invariants; semantic correctness comes when chunk 5b
+// fixtures need real script behavior).
+struct VanillaCard {
+    uint32_t code;
+    uint32_t type;
+    uint32_t level;
+    uint32_t attribute;
+    uint64_t race;
+    int32_t attack;
+    int32_t defense;
+};
+constexpr VanillaCard kVanillaCards[] = {
+    // Dark Magician
+    {46986414, 0x10 | 0x1, 7, 0x20, 0x2, 2500, 2100},
+    // Blue-Eyes White Dragon
+    {89631139, 0x10 | 0x1, 8, 0x10, 0x2000, 3000, 2500},
+    // Kuriboh — small low-level fixture for variety
+    {40640057, 0x10 | 0x1, 1, 0x20, 0x2, 300, 200},
+};
+
+void chunk5a_card_reader(void* /*payload*/, uint32_t code, OCG_CardData* data) {
+    if (data == nullptr) return;
+    std::memset(data, 0, sizeof(*data));
+    for (const auto& v : kVanillaCards) {
+        if (v.code == code) {
+            data->code = v.code;
+            data->alias = 0;
+            data->setcodes = nullptr;
+            data->type = v.type;
+            data->level = v.level;
+            data->attribute = v.attribute;
+            data->race = v.race;
+            data->attack = v.attack;
+            data->defense = v.defense;
+            data->lscale = 0;
+            data->rscale = 0;
+            data->link_marker = 0;
+            return;
+        }
+    }
+    // Unknown code → leave data zeroed; engine treats as "no such card".
+}
+
+int chunk5a_script_reader(void* /*payload*/, OCG_Duel /*duel*/,
+                          const char* /*name*/) {
+    // Vanilla normal monsters carry no per-card scripts in ProjectIgnis.
+    // 0 = "not loaded" (engine accepts and proceeds).
+    return 0;
+}
+
+OCG_Duel make_chunk5a_duel(uint64_t seed_lo) {
+    OCG_DuelOptions opts{};
+    opts.seed[0] = seed_lo;
+    opts.seed[1] = 0xCAFE;
+    opts.seed[2] = 0xBEEF;
+    opts.seed[3] = 0xF00D;
+    opts.flags = 0;
+    opts.team1 = OCG_Player{8000, 5, 1};
+    opts.team2 = OCG_Player{8000, 5, 1};
+    opts.cardReader = &chunk5a_card_reader;
+    opts.scriptReader = &chunk5a_script_reader;
+    opts.logHandler = &stub_log_handler;
+    opts.cardReaderDone = &stub_card_reader_done;
+    OCG_Duel duel = nullptr;
+    if (OCG_CreateDuel(&duel, &opts) != OCG_DUEL_CREATION_SUCCESS) {
+        return nullptr;
+    }
+    return duel;
+}
+
+OCG_DuelOptions make_chunk5a_load_options() {
+    OCG_DuelOptions opts{};
+    opts.seed[0] = 0xDEAD;  // overridden by load
+    opts.seed[1] = 0xBEEF;
+    opts.seed[2] = 0;
+    opts.seed[3] = 0;
+    opts.flags = 0;
+    opts.team1 = OCG_Player{8000, 5, 1};
+    opts.team2 = OCG_Player{8000, 5, 1};
+    opts.cardReader = &chunk5a_card_reader;
+    opts.scriptReader = &chunk5a_script_reader;
+    opts.logHandler = &stub_log_handler;
+    opts.cardReaderDone = &stub_card_reader_done;
+    return opts;
+}
+
+// Adds a small deck-list to player 0 (cards in the main deck list, which
+// is where StartDuel will draw from). Returns the number of cards added.
+// Each card is added at LOCATION_DECK with a sequential seq.
+int populate_simple_deck(OCG_Duel ocg_duel) {
+    int n = 0;
+    for (int copy = 0; copy < 3; ++copy) {
+        for (const auto& v : kVanillaCards) {
+            OCG_NewCardInfo info{};
+            info.team = 0;
+            info.duelist = 0;
+            info.code = v.code;
+            info.con = 0;
+            info.loc = 0x01;  // LOCATION_DECK
+            info.seq = static_cast<uint32_t>(n);
+            info.pos = 0x08;  // POS_FACEDOWN_DEFENSE
+            OCG_DuelNewCard(ocg_duel, &info);
+            ++n;
+        }
+    }
+    // Symmetric for player 1
+    for (int copy = 0; copy < 3; ++copy) {
+        for (const auto& v : kVanillaCards) {
+            OCG_NewCardInfo info{};
+            info.team = 1;
+            info.duelist = 0;
+            info.code = v.code;
+            info.con = 1;
+            info.loc = 0x01;
+            info.seq = static_cast<uint32_t>(n);
+            info.pos = 0x08;
+            OCG_DuelNewCard(ocg_duel, &info);
+            ++n;
+        }
+    }
+    return n;
+}
+
+bool test_chunk5a_card_round_trip() {
+    OCG_Duel orig = make_chunk5a_duel(0xC5A1);
+    CHECK_TRUE(orig != nullptr, "create orig");
+    populate_simple_deck(orig);
+
+    void* blob1 = nullptr;
+    uint32_t size1 = 0;
+    int s1 = OCG_DuelSaveState(orig, &blob1, &size1);
+    CHECK_EQ(s1, OCG_SAVE_OK, "save orig with cards");
+    CHECK_TRUE(size1 > 0, "non-empty blob");
+
+    OCG_DuelOptions opts = make_chunk5a_load_options();
+    OCG_Duel loaded = nullptr;
+    CHECK_EQ(OCG_DuelLoadState(blob1, size1, &opts, &loaded), OCG_LOAD_OK,
+             "load");
+    CHECK_TRUE(loaded != nullptr, "load produced duel");
+
+    void* blob2 = nullptr;
+    uint32_t size2 = 0;
+    CHECK_EQ(OCG_DuelSaveState(loaded, &blob2, &size2), OCG_SAVE_OK,
+             "save loaded");
+
+    CHECK_EQ(size1, size2, "round-trip sizes match");
+    if (std::memcmp(blob1, blob2, size1) != 0) {
+        const uint8_t* a = static_cast<const uint8_t*>(blob1);
+        const uint8_t* b = static_cast<const uint8_t*>(blob2);
+        for (uint32_t i = 0; i < size1; ++i) {
+            if (a[i] != b[i]) {
+                std::fprintf(stderr,
+                    "FAIL: card round-trip byte %u differs: 0x%02x vs 0x%02x\n",
+                    i, a[i], b[i]);
+                break;
+            }
+        }
+        OCG_FreeSaveBuffer(blob1); OCG_FreeSaveBuffer(blob2);
+        OCG_DestroyDuel(orig); OCG_DestroyDuel(loaded);
+        return false;
+    }
+
+    // Sanity-check loaded zones — the round-trip byte-equal above is
+    // the strict invariant; these are just enough to confirm the loaded
+    // duel actually has cards in the deck rather than empty zones.
+    auto* d = static_cast<duel*>(loaded);
+    CHECK_EQ(d->game_field->player[0].list_main.size(), 9u,
+             "loaded p0 deck size matches");
+    CHECK_EQ(d->game_field->player[1].list_main.size(), 9u,
+             "loaded p1 deck size matches");
+    // Every loaded card pointer should be non-null and have one of the
+    // three known codes. (Don't assert specific positions — the engine's
+    // add_card may reorder cards within LOCATION_DECK relative to the
+    // sequence I passed; the round-trip invariant doesn't care.)
+    int dm_count = 0, bewd_count = 0, kuriboh_count = 0;
+    for (card* c : d->game_field->player[0].list_main) {
+        CHECK_TRUE(c != nullptr, "loaded p0 card non-null");
+        if (c->data.code == 46986414u) ++dm_count;
+        else if (c->data.code == 89631139u) ++bewd_count;
+        else if (c->data.code == 40640057u) ++kuriboh_count;
+        else CHECK_TRUE(false, "loaded card has unknown code");
+    }
+    CHECK_EQ(dm_count, 3, "p0 has 3 Dark Magicians");
+    CHECK_EQ(bewd_count, 3, "p0 has 3 Blue-Eyes");
+    CHECK_EQ(kuriboh_count, 3, "p0 has 3 Kuribohs");
+
+    OCG_FreeSaveBuffer(blob1); OCG_FreeSaveBuffer(blob2);
+    OCG_DestroyDuel(orig); OCG_DestroyDuel(loaded);
+    return true;
+}
+
+// Helper: drain Process+GetMessage into a flat byte stream until the
+// engine returns END or AWAITING. AWAITING means the engine wants a
+// response; for the chunk-5a vanilla-monsters fixture, StartDuel + the
+// initial draw both proceed without awaiting, so we expect to see
+// AWAITING (game's first decision point) or END.
+//
+// Returns the captured raw MSG bytes (the same bytes EDOPro / WindBot
+// see). Comparison between two duels is byte-equal on these bytes.
+std::vector<uint8_t> drive_to_first_pause(OCG_Duel duel) {
+    std::vector<uint8_t> out;
+    while (true) {
+        const int status = OCG_DuelProcess(duel);
+        uint32_t len = 0;
+        void* msgs = OCG_DuelGetMessage(duel, &len);
+        if (msgs && len > 0) {
+            const uint8_t* p = static_cast<const uint8_t*>(msgs);
+            out.insert(out.end(), p, p + len);
+        }
+        if (status == OCG_DUEL_STATUS_END ||
+            status == OCG_DUEL_STATUS_AWAITING) {
+            break;
+        }
+        // Shouldn't loop forever in vanilla-monsters StartDuel; defensive cap.
+        if (out.size() > 1u << 20) {
+            std::fprintf(stderr,
+                "drive_to_first_pause: msg stream exceeded 1 MB; aborting\n");
+            break;
+        }
+    }
+    return out;
+}
+
+bool test_chunk5a_msg_stream_baseline_vs_load() {
+    // The headline chunk-5a test (per user note #2): real MSG-stream
+    // comparison on a non-vanilla state.
+    //
+    // Sequence:
+    //   1. Control duel C: CreateDuel + DuelNewCard + StartDuel + Process
+    //      until first pause; capture MSG stream.
+    //   2. Original duel A: CreateDuel + DuelNewCard (same cards, same seed);
+    //      save here (pre-StartDuel) to avoid hitting chunk-5a's
+    //      processor-state fail-loud.
+    //   3. Loaded duel B: load A's blob + StartDuel + Process until first
+    //      pause; capture MSG stream.
+    //   4. Assert C's stream == B's stream. The MSGs include shuffled deck
+    //      reveal etc., which depend on the RNG state save+load preserves.
+    constexpr uint64_t kSeed = 0x5EED1234ABCDEF00ULL;
+
+    // Control: build, start, drive
+    OCG_Duel control = make_chunk5a_duel(kSeed);
+    CHECK_TRUE(control != nullptr, "create control");
+    populate_simple_deck(control);
+    OCG_StartDuel(control);
+    auto stream_control = drive_to_first_pause(control);
+
+    // Original: build, save (pre-StartDuel)
+    OCG_Duel orig = make_chunk5a_duel(kSeed);
+    CHECK_TRUE(orig != nullptr, "create orig");
+    populate_simple_deck(orig);
+    void* blob = nullptr;
+    uint32_t size = 0;
+    CHECK_EQ(OCG_DuelSaveState(orig, &blob, &size), OCG_SAVE_OK,
+             "save orig pre-StartDuel");
+
+    // Loaded: load, start, drive
+    OCG_DuelOptions opts = make_chunk5a_load_options();
+    OCG_Duel loaded = nullptr;
+    CHECK_EQ(OCG_DuelLoadState(blob, size, &opts, &loaded), OCG_LOAD_OK,
+             "load");
+    OCG_StartDuel(loaded);
+    auto stream_loaded = drive_to_first_pause(loaded);
+
+    CHECK_TRUE(!stream_control.empty(), "control produced non-empty MSG stream");
+    CHECK_EQ(stream_control.size(), stream_loaded.size(),
+             "MSG stream sizes match");
+    if (stream_control != stream_loaded) {
+        for (size_t i = 0; i < stream_control.size() &&
+                            i < stream_loaded.size(); ++i) {
+            if (stream_control[i] != stream_loaded[i]) {
+                std::fprintf(stderr,
+                    "FAIL: MSG stream byte %zu differs: control=0x%02x "
+                    "loaded=0x%02x (control size=%zu, loaded size=%zu)\n",
+                    i, stream_control[i], stream_loaded[i],
+                    stream_control.size(), stream_loaded.size());
+                break;
+            }
+        }
+        OCG_FreeSaveBuffer(blob);
+        OCG_DestroyDuel(orig); OCG_DestroyDuel(control); OCG_DestroyDuel(loaded);
+        return false;
+    }
+
+    OCG_FreeSaveBuffer(blob);
+    OCG_DestroyDuel(orig); OCG_DestroyDuel(control); OCG_DestroyDuel(loaded);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // Free-buffer is safe on null
 // ---------------------------------------------------------------------------
 
@@ -724,6 +1021,10 @@ int main() {
         {"load_wrong_schema_version", &test_load_wrong_schema_version},
         {"load_refuse_tag", &test_load_refuse_tag},
         {"load_null_options_rejected", &test_load_null_options_rejected},
+        // Chunk 5a (vanilla cards + MSG-stream)
+        {"chunk5a_card_round_trip", &test_chunk5a_card_round_trip},
+        {"chunk5a_msg_stream_baseline_vs_load",
+         &test_chunk5a_msg_stream_baseline_vs_load},
         // Chunk 4 perf scaffold (informational; not gated)
         {"perf_scaffold_vanilla", &test_perf_scaffold_vanilla},
     };
