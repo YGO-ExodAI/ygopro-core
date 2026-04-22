@@ -88,10 +88,20 @@ struct LuaSaveContext {
     int max_depth = 6;
     int current_depth = 0;
 
+    // Chunk 5c-A: C-function pointer→qualified-name map. Built lazily
+    // on first access by walking known engine namespaces (Card, Duel,
+    // Effect, Group, aux/Auxiliary, math/string/table). Persists across
+    // cards within one save call — C function pointers don't change
+    // mid-save. Set by build_c_function_registry on first use.
+    std::unordered_map<const void*, std::string> c_function_registry;
+    bool c_function_registry_built = false;
+
     void reset_per_card() {
         table_registry.clear();
         next_table_handle = 1;
         current_depth = 0;
+        // Note: c_function_registry NOT cleared — pointers stay valid
+        // across cards in the same save call.
     }
 };
 

@@ -1404,46 +1404,17 @@ bool test_chunk5c_empty_table_round_trip() {
                                LOC_MZONE, /*seq=*/0, POS_FACEUP_ATK, 0x5C01);
 }
 
-// C-function-in-table refuse-path verification. The chunk-5c.0
-// characterization identified 519 cards with C-function inner upvalues
-// — a categorically different problem from Lua-function dump (no
-// bytecode path possible). 5c deferred C-function support per the
-// scope cap; these cards continue to refuse with an informative reason.
-//
-// c43227 (Magnum the Reliever) is one such case: its Fusion.AddProcMix
-// chain produces a closure whose effect.condition slot has a C function
-// (likely Card.IsLocation via aux.FilterBoolFunctionEx). This test
-// verifies the refuse path stays clean and informative for such cases.
-//
-// Lua-function-valued tables (the much larger majority of the dispatch
-// pattern) are exercised implicitly by the chunk-6 corpus re-measurement
-// and by other fixtures whose closures happen to capture them. No
-// dedicated round-trip fixture is added because the refuse rate
-// re-measurement provides better aggregate evidence than one fixture.
+// Function-valued-table fixture (the dispatch pattern). c43227 (Magnum
+// the Reliever) uses Fusion.AddProcMix → aux.FilterBoolFunctionEx,
+// which produces a closure whose effect.condition has a Card.IsLocation
+// C function as inner upvalue. Pre-5c-A this refused; chunk 5c-A's
+// C-function-name registry resolves Card.IsLocation by qualified name.
+// Now round-trips byte-equal.
 bool test_chunk5c_function_table_round_trip() {
-    OCG_Duel orig = make_scripted_duel(0x5C02);
-    CHECK_TRUE(orig != nullptr, "create orig");
-    OCG_NewCardInfo info{};
-    info.code = 43227;
-    info.team = 0; info.duelist = 0; info.con = 0;
-    info.loc = 0x4; info.seq = 0; info.pos = 0x1;
-    OCG_DuelNewCard(orig, &info);
-    auto* d_orig = static_cast<duel*>(orig);
-    std::printf("  c_function_in_table: %zu effects, %zu cards\n",
-                d_orig->effects.size(), d_orig->cards.size());
-
-    std::string out, reason;
-    auto status = ocg::serialize::serialize_duel(*d_orig, &out, &reason);
-    OCG_DestroyDuel(orig);
-
-    CHECK_EQ(status, OCG_SAVE_ERR_REFUSE_UNKNOWN_UPVALUE_TYPE,
-             "C-function refuse status");
-    CHECK_TRUE(reason.find("C function") != std::string::npos,
-               "refuse_reason names 'C function'");
-    CHECK_TRUE(reason.find("card=43227") != std::string::npos,
-               "refuse_reason identifies card");
-    std::printf("  c_function_in_table refuse_reason: %s\n", reason.c_str());
-    return true;
+    constexpr uint32_t LOC_MZONE = 0x4;
+    constexpr uint32_t POS_FACEUP_ATK = 0x1;
+    return scripted_round_trip("function_table", 43227,
+                               LOC_MZONE, /*seq=*/0, POS_FACEUP_ATK, 0x5C02);
 }
 
 // Intra-card shared-table fixture. The chunk-5c.0 characterization found

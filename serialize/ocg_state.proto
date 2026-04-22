@@ -515,6 +515,17 @@ message CapturedArg {
         // sharing is prevalent enough in the corpus to warrant the
         // wider scope.
         uint32 table_ref = 11;
+
+        // Chunk 5c-A (post-12.93%-measurement extension): qualified
+        // name of a C function (e.g. "Card.IsLocation", "aux.AND",
+        // "Group.CreateGroup"). C functions can't be lua_dump'd, so
+        // they're serialized by name and resolved on load via nested
+        // lua_getglobal + lua_getfield. The save side builds a
+        // pointer→name map at save start by walking known engine
+        // namespaces (Card, Duel, Effect, Group, aux, Auxiliary, plus
+        // Lua stdlib math/string/table). Functions outside those
+        // namespaces refuse cleanly with an informative reason.
+        string c_function_name = 12;
     }
 }
 

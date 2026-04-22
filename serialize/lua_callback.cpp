@@ -246,6 +246,99 @@ int dump_writer(lua_State* /*L*/, const void* p, size_t sz, void* ud) {
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+// Chunk 5c-A: C-function-name registry. Walks known engine namespaces to
+// build a void*→qualified-name map (e.g. "Card.IsLocation", "aux.AND").
+// Used to serialize C function upvalues by name — they can't be lua_dump'd.
+// ---------------------------------------------------------------------------
+
+// Recursively walk a table, recording function values. Path is the
+// dotted name prefix for entries within this table (e.g. "Card.").
+// Bounded by max_depth to avoid pathological cycles in user tables.
+void walk_table_for_c_functions(
+        lua_State* L, int tbl_idx, const std::string& prefix,
+        std::unordered_map<const void*, std::string>& reg,
+        int max_depth, int current_depth) {
+    if (current_depth >= max_depth) return;
+    luaL_checkstack(L, 4, nullptr);
+    const int abs_tbl = tbl_idx > 0 ? tbl_idx : lua_absindex(L, tbl_idx);
+
+    lua_pushnil(L);
+    while (lua_next(L, abs_tbl) != 0) {
+        // key at -2, value at -1
+        if (lua_type(L, -2) == LUA_TSTRING) {
+            const char* key_str = lua_tostring(L, -2);
+            const int vt = lua_type(L, -1);
+            if (vt == LUA_TFUNCTION && lua_iscfunction(L, -1)) {
+                const void* ptr = lua_topointer(L, -1);
+                if (ptr && reg.find(ptr) == reg.end()) {
+                    reg[ptr] = prefix + key_str;
+                }
+            } else if (vt == LUA_TTABLE) {
+                // Recurse into nested namespace tables — but skip self-
+                // referential entries and the script's `s` tables (those
+                // start with 'c' followed by digits, like "c19162134").
+                // Walking script self-tables would explode the registry
+                // and isn't what we want — those don't expose C functions
+                // worth referencing by name.
+                bool skip = false;
+                if (key_str[0] == 'c' && key_str[1] >= '0' && key_str[1] <= '9') {
+                    skip = true;
+                }
+                // Avoid double-walking core globals to prevent the
+                // registry-explosion from _G recursion through itself
+                // (e.g. _G._G or package.loaded.<self>).
+                if (!skip && std::strcmp(key_str, "_G") != 0 &&
+                    std::strcmp(key_str, "loaded") != 0 &&
+                    std::strcmp(key_str, "_LOADED") != 0 &&
+                    std::strcmp(key_str, "package") != 0) {
+                    walk_table_for_c_functions(L, -1,
+                        prefix + key_str + ".",
+                        reg, max_depth, current_depth + 1);
+                }
+            }
+        }
+        lua_pop(L, 1);
+    }
+}
+
+// Build the registry. Walks a fixed set of engine namespaces — covers
+// the patterns observed in the script corpus (Card.IsLocation,
+// aux.FilterBoolFunctionEx, etc.). Functions outside these namespaces
+// will refuse on save with an informative reason.
+void build_c_function_registry(lua_State* L,
+        std::unordered_map<const void*, std::string>& reg) {
+    luaL_checkstack(L, 4, nullptr);
+
+    // Engine namespaces. These cover the vast majority of C functions
+    // exposed to scripts. Order doesn't matter — first sighting wins,
+    // but each function appears under one canonical name.
+    static const char* kNamespaces[] = {
+        "Card", "Duel", "Effect", "Group", "Debug",
+        "aux", "Auxiliary",
+        // Lua stdlib
+        "math", "string", "table", "io", "os", "coroutine",
+        nullptr,
+    };
+    for (size_t i = 0; kNamespaces[i] != nullptr; ++i) {
+        lua_getglobal(L, kNamespaces[i]);
+        if (lua_type(L, -1) == LUA_TTABLE) {
+            std::string prefix = std::string(kNamespaces[i]) + ".";
+            walk_table_for_c_functions(L, -1, prefix, reg,
+                                        /*max_depth=*/4,
+                                        /*current_depth=*/0);
+        }
+        lua_pop(L, 1);
+    }
+
+    // Top-level _G C functions (e.g. type, tostring, ipairs, pairs).
+    lua_pushglobaltable(L);
+    walk_table_for_c_functions(L, -1, "", reg,
+                                /*max_depth=*/2,  // shallow at top level
+                                /*current_depth=*/0);
+    lua_pop(L, 1);
+}
+
 // Detects the canonical `local s,id=GetID()` pattern: is this upvalue
 // the script's own _G["c<owning_card_code>"] table?
 uint32_t detect_script_self_table(lua_State* L, int idx,
@@ -443,12 +536,26 @@ OCG_SaveStatus capture_value_recursive(lua_State* L, int idx, const duel& d,
             return dump_table(L, abs_idx, d, ctx, card_konami_id, slot_name,
                               upvalue_idx, out, refuse_reason);
         case LUA_TFUNCTION:
-            // C functions can't be lua_dump'd. Refuse with informative
-            // reason.
+            // Chunk 5c-A: C functions resolved by qualified name via
+            // the registry built at first encounter.
             if (lua_iscfunction(L, abs_idx)) {
+                if (!ctx.c_function_registry_built) {
+                    build_c_function_registry(L, ctx.c_function_registry);
+                    ctx.c_function_registry_built = true;
+                }
+                const void* fn_ptr = lua_topointer(L, abs_idx);
+                auto it = ctx.c_function_registry.find(fn_ptr);
+                if (it != ctx.c_function_registry.end()) {
+                    out->set_c_function_name(it->second);
+                    return OCG_SAVE_OK;
+                }
+                // Not in any known namespace — refuse with informative
+                // reason. The reason already says "C function" via
+                // format_refuse_reason; append the not-found note.
                 if (refuse_reason) {
                     *refuse_reason = format_refuse_reason(
-                        L, abs_idx, card_konami_id, slot_name, upvalue_idx);
+                        L, abs_idx, card_konami_id, slot_name, upvalue_idx,
+                        "not found in chunk-5c-A name registry");
                 }
                 return OCG_SAVE_ERR_REFUSE_UNKNOWN_UPVALUE_TYPE;
             }
@@ -606,20 +713,44 @@ OCG_SaveStatus dump_lua_callback(lua_State* L, int32_t lua_ref, const duel& d,
         return OCG_SAVE_OK;
     }
     if (lua_iscfunction(L, -1)) {
-        // Top-level callback is a C function. lua_dump can't serialize.
-        // Refuse with reason — these are the 6 "lua_dump returned 1"
-        // cases from the chunk-6 measurement, characterized in 5c.0.
-        if (refuse_reason) {
-            char buf[160];
-            std::snprintf(buf, sizeof(buf),
-                "callback at slot=%s on card=%u is a C function "
-                "(no bytecode dump path; needs C-function registry "
-                "support, deferred per chunk-5c scope cap)",
-                slot_name ? slot_name : "?", card_konami_id);
-            *refuse_reason = buf;
+        // Chunk 5c-A: top-level C-function callback, resolved by
+        // qualified name via the registry. The 6 "lua_dump returned 1"
+        // cases from chunk-6 + the broader cohort exposed by 5c's
+        // recursive walk land here.
+        //
+        // We encode this as LuaCallback.present=true with bytecode
+        // empty AND a single CapturedArg.c_function_name in upvalues[0].
+        // Load side detects this shape and pushes the named C function
+        // directly instead of luaL_loadbuffer. (Reusing the existing
+        // upvalues field avoids a schema bump for one variant — the
+        // schema already supports CapturedArg.c_function_name; we just
+        // use it at slot 0 instead of as a captured upvalue.)
+        if (!ctx.c_function_registry_built) {
+            build_c_function_registry(L, ctx.c_function_registry);
+            ctx.c_function_registry_built = true;
         }
+        const void* fn_ptr = lua_topointer(L, -1);
+        auto it = ctx.c_function_registry.find(fn_ptr);
+        if (it == ctx.c_function_registry.end()) {
+            if (refuse_reason) {
+                char buf[200];
+                std::snprintf(buf, sizeof(buf),
+                    "top-level callback at slot=%s on card=%u is a "
+                    "C function not in chunk-5c-A name registry "
+                    "(check engine namespace coverage)",
+                    slot_name ? slot_name : "?", card_konami_id);
+                *refuse_reason = buf;
+            }
+            lua_settop(L, top_before);
+            return OCG_SAVE_ERR_REFUSE_UNKNOWN_UPVALUE_TYPE;
+        }
+        out->set_present(true);
+        // Empty bytecode + single CapturedArg.c_function_name marks
+        // "this is a C function callback".
+        auto* arg = out->add_upvalues();
+        arg->set_c_function_name(it->second);
         lua_settop(L, top_before);
-        return OCG_SAVE_ERR_REFUSE_UNKNOWN_UPVALUE_TYPE;
+        return OCG_SAVE_OK;
     }
 
     // The function is at top of stack; let dump_function_recursive handle
@@ -747,6 +878,54 @@ bool restore_value_recursive(lua_State* L,
             lua_rawgeti(L, LUA_REGISTRYINDEX, it->second);
             return true;
         }
+        case ocg::state::CapturedArg::kCFunctionName: {
+            // Chunk 5c-A: walk the qualified name (e.g. "Card.IsLocation")
+            // by lua_getglobal + nested lua_getfield. Push the resolved
+            // C function on success.
+            const std::string& qname = arg.c_function_name();
+            // Tokenize on '.'.
+            size_t start = 0;
+            size_t dot = qname.find('.', start);
+            std::string head = qname.substr(start, dot - start);
+            lua_getglobal(L, head.c_str());
+            if (lua_isnil(L, -1)) {
+                lua_pop(L, 1);
+                if (load_error) {
+                    *load_error = "c_function_name '" + qname +
+                                  "' root '" + head + "' not in _G";
+                }
+                return false;
+            }
+            while (dot != std::string::npos) {
+                start = dot + 1;
+                dot = qname.find('.', start);
+                std::string seg = qname.substr(start, dot - start);
+                if (lua_type(L, -1) != LUA_TTABLE) {
+                    lua_pop(L, 1);
+                    if (load_error) {
+                        *load_error = "c_function_name '" + qname +
+                                      "' segment '" + seg +
+                                      "' parent is not a table";
+                    }
+                    return false;
+                }
+                lua_getfield(L, -1, seg.c_str());
+                lua_remove(L, -2);  // remove the parent table
+                if (lua_isnil(L, -1)) {
+                    lua_pop(L, 1);
+                    if (load_error) {
+                        *load_error = "c_function_name '" + qname +
+                                      "' segment '" + seg + "' not found";
+                    }
+                    return false;
+                }
+            }
+            // Final value should be a C function. (Defensive — could be
+            // a Lua function if the namespace changed between save and
+            // load; we accept either since the calling code just uses
+            // whatever's at this name now.)
+            return true;
+        }
     }
     if (load_error) *load_error = "unhandled CapturedArg variant";
     return false;
@@ -764,9 +943,24 @@ int32_t restore_function_recursive(lua_State* L,
                                     LuaLoadContext& ctx,
                                     std::string* load_error) {
     if (!saved.present()) return 0;
+
+    // Chunk 5c-A: top-level C-function callback shape. Save side encodes
+    // these as present=true + bytecode empty + a single CapturedArg
+    // c_function_name in upvalues[0]. Detect that shape, push the named
+    // C function, register it.
     if (saved.bytecode().empty()) {
+        if (saved.upvalues_size() == 1 &&
+            saved.upvalues(0).value_case() ==
+                ocg::state::CapturedArg::kCFunctionName) {
+            if (!restore_value_recursive(L, saved.upvalues(0), ctx, load_error)) {
+                return 0;
+            }
+            // Function on stack top; register and return ref.
+            return luaL_ref(L, LUA_REGISTRYINDEX);
+        }
         if (load_error) *load_error =
-            "LuaCallback present=true but bytecode empty";
+            "LuaCallback present=true but bytecode empty (and not a "
+            "5c-A C-function-callback shape)";
         return 0;
     }
 
