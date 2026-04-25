@@ -32,8 +32,26 @@ namespace pb = ::ocg::state;
 
 namespace {
 
+// B1 fix (Option A): liveness guard for save-side effect handle assignment.
+// `card_state::reason_effect`, `chain::triggering_effect`, and
+// `chain::disable_reason` are plain `effect*` fields with no lifecycle
+// management — `duel::delete_effect` frees the effect but never clears
+// these references. Routing a freed pointer through `he.assign` adds it
+// to the effect handle table, and the effect-record write loop then
+// dereferences freed memory at save_state.cpp:260. Returning 0 (null
+// handle) for non-live effects keeps the freed pointer out of the
+// handle table.
+inline uint32_t assign_effect_if_live(
+        HandleTable<effect>& he, effect* peff,
+        const std::unordered_set<effect*>& live_effects) {
+    if (peff == nullptr) return 0;
+    if (live_effects.count(peff) == 0) return 0;
+    return he.assign(peff);
+}
+
 void write_card_state(const card_state& src, pb::CardStateSnapshot* dst,
-                      HandleTable<card>& hc, HandleTable<effect>& he) {
+                      HandleTable<card>& hc, HandleTable<effect>& he,
+                      const std::unordered_set<effect*>& live_effects) {
     dst->set_code(src.code);
     dst->set_code2(src.code2);
     for (uint16_t sc : src.setcodes) dst->add_setcodes(sc);
@@ -57,7 +75,8 @@ void write_card_state(const card_state& src, pb::CardStateSnapshot* dst,
     dst->set_reason(src.reason);
     dst->set_pzone(src.pzone);
     dst->set_reason_card_handle(hc.assign(src.reason_card));
-    dst->set_reason_effect_handle(he.assign(src.reason_effect));
+    dst->set_reason_effect_handle(
+        assign_effect_if_live(he, src.reason_effect, live_effects));
     dst->set_reason_player(src.reason_player);
 }
 
@@ -110,10 +129,13 @@ void write_effect_refs(const card::effect_container& src,
 }
 
 void write_card_record(const card& src, pb::CardRecord* dst,
-                       HandleTable<card>& hc, HandleTable<effect>& he) {
-    write_card_state(src.current, dst->mutable_current(), hc, he);
-    write_card_state(src.previous, dst->mutable_previous(), hc, he);
-    write_card_state(src.temp, dst->mutable_temp(), hc, he);
+                       HandleTable<card>& hc, HandleTable<effect>& he,
+                       const std::unordered_set<effect*>& live_effects) {
+    write_card_state(src.current, dst->mutable_current(), hc, he,
+                     live_effects);
+    write_card_state(src.previous, dst->mutable_previous(), hc, he,
+                     live_effects);
+    write_card_state(src.temp, dst->mutable_temp(), hc, he, live_effects);
 
     write_effect_refs(src.single_effect, dst->mutable_single_effect(), he);
     write_effect_refs(src.field_effect, dst->mutable_field_effect(), he);
@@ -286,9 +308,10 @@ OCG_SaveStatus write_effect_record(const effect& src, pb::EffectRecord* dst,
 // lands when we have non-trivial fixtures (chunks 4-5 fold these in).
 void write_chain_link(const chain& src, pb::ChainLink* dst,
                       HandleTable<card>& hc, HandleTable<effect>& he,
-                      HandleTable<group>& hg) {
+                      HandleTable<group>& hg,
+                      const std::unordered_set<effect*>& live_effects) {
     write_card_state(src.triggering_state, dst->mutable_triggering_state(),
-                     hc, he);
+                     hc, he, live_effects);
     dst->set_chain_count(src.chain_count);
     dst->set_chain_id(src.chain_id);
     dst->set_triggering_player(src.triggering_player);
@@ -307,18 +330,21 @@ void write_chain_link(const chain& src, pb::ChainLink* dst,
     dst->set_target_param(src.target_param);
     dst->set_flag(src.flag);
     dst->set_event_id(src.event_id);
-    dst->set_triggering_effect_handle(he.assign(src.triggering_effect));
+    dst->set_triggering_effect_handle(
+        assign_effect_if_live(he, src.triggering_effect, live_effects));
     dst->set_target_cards_group_handle(hg.assign(src.target_cards));
-    dst->set_disable_reason_handle(he.assign(src.disable_reason));
+    dst->set_disable_reason_handle(
+        assign_effect_if_live(he, src.disable_reason, live_effects));
     // opinfos / possibleopinfos / triggering_event left for chunk 4-5
     // when fixtures actually exercise them.
 }
 
 void write_chain(const field& f, pb::ChainStack* dst,
                  HandleTable<card>& hc, HandleTable<effect>& he,
-                 HandleTable<group>& hg) {
+                 HandleTable<group>& hg,
+                 const std::unordered_set<effect*>& live_effects) {
     for (const auto& link : f.core.current_chain) {
-        write_chain_link(link, dst->add_links(), hc, he, hg);
+        write_chain_link(link, dst->add_links(), hc, he, hg, live_effects);
     }
     // tpchain / ntpchain / select_chains: stub for chunk 3 (vanilla
     // duels never have these populated). Full walk in chunk 4-5.
@@ -604,7 +630,7 @@ OCG_SaveStatus serialize_duel(const duel& d, std::string* out,
                                ht_cards);
         }
         write_chain(*d.game_field, state.mutable_chain(),
-                    ht_cards, ht_effects, ht_groups);
+                    ht_cards, ht_effects, ht_groups, d.effects);
         // Chunk 9a Tier 1: write_processor can refuse on non-Tier-1
         // unit types. Surface the refuse with the format the corpus
         // measurement expects.
@@ -617,7 +643,7 @@ OCG_SaveStatus serialize_duel(const duel& d, std::string* out,
     for (card* c : ht_cards.in_handle_order()) {
         auto* cr = state.add_cards();
         cr->set_handle(ht_cards.assign(c));
-        write_card_record(*c, cr, ht_cards, ht_effects);
+        write_card_record(*c, cr, ht_cards, ht_effects, d.effects);
     }
 
     // Chunk 5c: thread a LuaSaveContext through write_effect_record. The
