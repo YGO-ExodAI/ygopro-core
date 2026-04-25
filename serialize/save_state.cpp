@@ -339,6 +339,26 @@ void write_chain_link(const chain& src, pb::ChainLink* dst,
     // when fixtures actually exercise them.
 }
 
+// Chunk 9b: lift the select_chains save refuse. Each entry's
+// triggering_effect is the only meaningful field for step==1
+// validation (size check) and step==1 dispatch (selection by index).
+// Apply the same B1 liveness guard as current_chain.
+//
+// tpchain / ntpchain are NOT lifted here — §15 characterization (eval
+// + this run) saw zero corpus population. They stay refused at the
+// pre-walk gate in serialize_duel.
+void write_select_chains(const processor& core, pb::ChainStack* dst,
+                          HandleTable<effect>& he,
+                          const std::unordered_set<effect*>& live_effects) {
+    for (const auto& ch : core.select_chains) {
+        auto* p = dst->add_select_chains();
+        p->set_chain_id(ch.chain_id);
+        p->set_triggering_player(ch.triggering_player);
+        p->set_triggering_effect_handle(
+            assign_effect_if_live(he, ch.triggering_effect, live_effects));
+    }
+}
+
 void write_chain(const field& f, pb::ChainStack* dst,
                  HandleTable<card>& hc, HandleTable<effect>& he,
                  HandleTable<group>& hg,
@@ -346,21 +366,29 @@ void write_chain(const field& f, pb::ChainStack* dst,
     for (const auto& link : f.core.current_chain) {
         write_chain_link(link, dst->add_links(), hc, he, hg, live_effects);
     }
-    // tpchain / ntpchain / select_chains: stub for chunk 3 (vanilla
-    // duels never have these populated). Full walk in chunk 4-5.
+    // chunk 9b: lift select_chains save (tpchain/ntpchain still stubbed —
+    // §15 saw zero corpus population, refuse stays at the pre-walk gate).
+    write_select_chains(f.core, dst, he, live_effects);
 }
 
-// Chunk 9a Tier 1+2: ProcessorState save with type-gated walk.
+// Chunk 9a Tier 1+2 / 9b Tier 3: ProcessorState save with type-gated walk.
 // Walks both core.units (Tier 1) and core.subunits (Tier 2) into the
 // ProcessorState message. Per-list, refuses with informative reason if
 // any entry is a variant type not in the current tier's coverage.
 //
-// Tier coverage:
-//   Tier 1 (units, in handler stack at decision boundaries):
+// Tier coverage (post-9b):
+//   Tier 1 (units, dominant at decision boundaries):
 //     Adjust / Turn / SelectIdleCmd / SelectPlace / IdleCommand /
 //     PhaseEvent
 //   Tier 2 (subunits, queued by effect-monster initial_effect):
 //     SelfDestroy / SelfToGrave
+//   Tier 3 (chunk-9b, schema v2, every Process<true> variant):
+//     SelectBattleCmd / SelectChain / SelectCard / SelectCardCodes /
+//     SelectUnselectCard / SelectPosition / SelectTributeP /
+//     SelectCounter / SelectSum / SortCard / SelectYesNo /
+//     SelectEffectYesNo / SelectOption / AnnounceRace /
+//     AnnounceAttribute / AnnounceCard / AnnounceNumber /
+//     RockPaperScissors
 //
 // Same handler used for both lists since they're the same
 // processor_unit variant — coverage tier is enforced per-list by
@@ -426,14 +454,143 @@ OCG_SaveStatus write_processor_unit_inner(
                 auto* m = dst_unit->mutable_self_to_grave();
                 m->set_step(v.step);
                 return OCG_SAVE_OK;
+            // ── Tier 3 variants (chunk 9b) ──────────────────────
+            } else if constexpr (std::is_same_v<T, Processors::SelectBattleCmd>) {
+                auto* m = dst_unit->mutable_select_battle_cmd();
+                m->set_step(v.step);
+                m->set_playerid(v.playerid);
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::SelectChain>) {
+                auto* m = dst_unit->mutable_select_chain();
+                m->set_step(v.step);
+                m->set_playerid(v.playerid);
+                m->set_spe_count(v.spe_count);
+                m->set_forced(v.forced);
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::SelectCard>) {
+                auto* m = dst_unit->mutable_select_card();
+                m->set_step(v.step);
+                m->set_playerid(v.playerid);
+                m->set_cancelable(v.cancelable);
+                m->set_min(v.min);
+                m->set_max(v.max);
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::SelectCardCodes>) {
+                auto* m = dst_unit->mutable_select_card_codes();
+                m->set_step(v.step);
+                m->set_playerid(v.playerid);
+                m->set_cancelable(v.cancelable);
+                m->set_min(v.min);
+                m->set_max(v.max);
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::SelectUnselectCard>) {
+                auto* m = dst_unit->mutable_select_unselect_card();
+                m->set_step(v.step);
+                m->set_playerid(v.playerid);
+                m->set_cancelable(v.cancelable);
+                m->set_min(v.min);
+                m->set_max(v.max);
+                m->set_finishable(v.finishable);
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::SelectPosition>) {
+                auto* m = dst_unit->mutable_select_position();
+                m->set_step(v.step);
+                m->set_playerid(v.playerid);
+                m->set_code(v.code);
+                m->set_positions(v.positions);
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::SelectTributeP>) {
+                auto* m = dst_unit->mutable_select_tribute_p();
+                m->set_step(v.step);
+                m->set_playerid(v.playerid);
+                m->set_cancelable(v.cancelable);
+                m->set_min(v.min);
+                m->set_max(v.max);
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::SelectCounter>) {
+                auto* m = dst_unit->mutable_select_counter();
+                m->set_step(v.step);
+                m->set_playerid(v.playerid);
+                m->set_countertype(v.countertype);
+                m->set_count(v.count);
+                m->set_self(v.self);
+                m->set_oppo(v.oppo);
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::SelectSum>) {
+                auto* m = dst_unit->mutable_select_sum();
+                m->set_step(v.step);
+                m->set_playerid(v.playerid);
+                m->set_acc(v.acc);
+                m->set_min(v.min);
+                m->set_max(v.max);
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::SortCard>) {
+                auto* m = dst_unit->mutable_sort_card();
+                m->set_step(v.step);
+                m->set_playerid(v.playerid);
+                m->set_is_chain(v.is_chain);
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::SelectYesNo>) {
+                auto* m = dst_unit->mutable_select_yes_no();
+                m->set_step(v.step);
+                m->set_playerid(v.playerid);
+                m->set_description(v.description);
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::SelectEffectYesNo>) {
+                auto* m = dst_unit->mutable_select_effect_yes_no();
+                m->set_step(v.step);
+                m->set_playerid(v.playerid);
+                // pcard is the only pointer in any Tier 3 unit. Routed
+                // through hc_assign_safe so cards not in the zone walk
+                // (e.g. mid-summon temp_card edge cases) become 0
+                // rather than orphan handles.
+                m->set_pcard_handle(hc_assign_safe(hc, v.pcard));
+                m->set_description(v.description);
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::SelectOption>) {
+                auto* m = dst_unit->mutable_select_option();
+                m->set_step(v.step);
+                m->set_playerid(v.playerid);
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::AnnounceRace>) {
+                auto* m = dst_unit->mutable_announce_race();
+                m->set_step(v.step);
+                m->set_playerid(v.playerid);
+                m->set_count(v.count);
+                m->set_available(v.available);
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::AnnounceAttribute>) {
+                auto* m = dst_unit->mutable_announce_attribute();
+                m->set_step(v.step);
+                m->set_playerid(v.playerid);
+                m->set_count(v.count);
+                m->set_available(v.available);
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::AnnounceCard>) {
+                auto* m = dst_unit->mutable_announce_card();
+                m->set_step(v.step);
+                m->set_playerid(v.playerid);
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::AnnounceNumber>) {
+                auto* m = dst_unit->mutable_announce_number();
+                m->set_step(v.step);
+                m->set_playerid(v.playerid);
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::RockPaperScissors>) {
+                auto* m = dst_unit->mutable_rps();
+                m->set_step(v.step);
+                m->set_repeat(v.repeat);
+                m->set_hand0(v.hand0);
+                return OCG_SAVE_OK;
             } else {
                 if (refuse_reason) {
                     char buf[240];
                     std::snprintf(buf, sizeof(buf),
-                        "chunk-9a Tier 1+2 stub: processor unit in '%s' "
+                        "chunk-9a/b stub: processor unit in '%s' "
                         "at index %d is type '%s' (not in current tier "
-                        "coverage). Tier 3 (or wider Tier 2 if this is "
-                        "the next dominant variant) lifts this.",
+                        "coverage). The Process<false> non-Select "
+                        "variants (BattleCommand, Destroy, …) wait on "
+                        "their own characterization pass.",
                         list_name, unit_idx, typeid(T).name());
                     *refuse_reason = buf;
                 }
@@ -442,10 +599,58 @@ OCG_SaveStatus write_processor_unit_inner(
         }, u);
 }
 
+// Chunk 9b: write field.processor scratch state (the lists/flags
+// validated at step==1 of every Select* handler). The card_vector
+// members reference cards already in zone walks, so handle assignment
+// always succeeds via the existing ht_cards. select_chains has the
+// only effect-pointer hazard — routed through assign_effect_if_live to
+// match the B1 UAF guard already applied to current_chain.
+void write_processor_scratch(
+        const processor& core, pb::ProcessorState* dst,
+        HandleTable<card>& hc, HandleTable<effect>& he,
+        const std::unordered_set<effect*>& live_effects) {
+    auto write_card_vec = [&](const card_vector& src,
+                               google::protobuf::RepeatedField<uint32_t>* out) {
+        for (card* c : src) out->Add(hc_assign_safe(hc, c));
+    };
+    write_card_vec(core.summonable_cards,    dst->mutable_summonable_cards());
+    write_card_vec(core.spsummonable_cards,  dst->mutable_spsummonable_cards());
+    write_card_vec(core.repositionable_cards,dst->mutable_repositionable_cards());
+    write_card_vec(core.msetable_cards,      dst->mutable_msetable_cards());
+    write_card_vec(core.ssetable_cards,      dst->mutable_ssetable_cards());
+    write_card_vec(core.attackable_cards,    dst->mutable_attackable_cards());
+    write_card_vec(core.select_cards,        dst->mutable_select_cards());
+    write_card_vec(core.unselect_cards,      dst->mutable_unselect_cards());
+    write_card_vec(core.must_select_cards,   dst->mutable_must_select_cards());
+
+    for (const auto& kv : core.select_cards_codes) {
+        auto* p = dst->add_select_cards_codes();
+        p->set_code(kv.first);
+        p->set_info(kv.second);
+    }
+
+    for (uint64_t opt : core.select_options) dst->add_select_options(opt);
+
+    // select_effects: effect pointers, B1-guarded.
+    for (effect* e : core.select_effects) {
+        dst->add_select_effects(assign_effect_if_live(he, e, live_effects));
+    }
+
+    dst->set_to_bp(core.to_bp);
+    dst->set_to_m2(core.to_m2);
+    dst->set_to_ep(core.to_ep);
+    dst->set_skip_m2(core.skip_m2);
+    dst->set_hint_timing_0(core.hint_timing[0]);
+    dst->set_hint_timing_1(core.hint_timing[1]);
+    dst->set_chain_attack(core.chain_attack);
+    dst->set_chain_attacker_id(core.chain_attacker_id);
+}
+
 OCG_SaveStatus write_processor(const processor& core, pb::ProcessorState* dst,
                                 HandleTable<card>& hc,
-                                HandleTable<effect>& /*he*/,
+                                HandleTable<effect>& he,
                                 HandleTable<group>& /*hg*/,
+                                const std::unordered_set<effect*>& live_effects,
                                 std::string* refuse_reason) {
     int idx = 0;
     for (const auto& u : core.units) {
@@ -459,6 +664,11 @@ OCG_SaveStatus write_processor(const processor& core, pb::ProcessorState* dst,
             u, dst->add_subunits(), hc, "subunits", idx++, refuse_reason);
         if (s != OCG_SAVE_OK) return s;
     }
+
+    // Chunk 9b: scratch-state lists/flags consumed at step==1 of every
+    // Select* handler (playerop.cpp:18-870). Without these, every legal
+    // response is rejected → MSG_RETRY → terminate.
+    write_processor_scratch(core, dst, hc, he, live_effects);
     return OCG_SAVE_OK;
 }
 
@@ -508,14 +718,17 @@ OCG_SaveStatus serialize_duel(const duel& d, std::string* out,
     // implement.
     if (d.game_field) {
         const auto& core = d.game_field->core;
-        if (!core.tpchain.empty() || !core.ntpchain.empty() ||
-            !core.select_chains.empty()) {
+        // chunk 9b: select_chains is now serialized via write_select_chains.
+        // tpchain / ntpchain still refuse — §15 characterization (eval +
+        // 2026-04-25 re-walk) saw zero corpus population at any decision
+        // boundary in the YugiKaiba starter format. First fixture that
+        // hits one of those drives a follow-up characterization pass.
+        if (!core.tpchain.empty() || !core.ntpchain.empty()) {
             *refuse_reason =
-                "chunk-9a Tier 2 stub: tpchain / ntpchain / "
-                "select_chains are not yet wired into the save path. "
-                "§15 characterization observed zero population at "
-                "single-card-add scenarios; first fixture that hits "
-                "this drives a follow-up characterization pass.";
+                "chunk-9b stub: tpchain / ntpchain are not yet wired "
+                "into the save path. §15 characterization observed zero "
+                "population in the YugiKaiba corpus; first fixture that "
+                "hits this drives a follow-up characterization pass.";
             return OCG_SAVE_ERR_INTERNAL;
         }
     }
@@ -636,7 +849,7 @@ OCG_SaveStatus serialize_duel(const duel& d, std::string* out,
         // measurement expects.
         OCG_SaveStatus pstatus = write_processor(
             d.game_field->core, state.mutable_processor(),
-            ht_cards, ht_effects, ht_groups, refuse_reason);
+            ht_cards, ht_effects, ht_groups, d.effects, refuse_reason);
         if (pstatus != OCG_SAVE_OK) return pstatus;
     }
 

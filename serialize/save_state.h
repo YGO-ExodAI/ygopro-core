@@ -49,8 +49,21 @@ OCG_SaveStatus serialize_duel(const duel& d,
                               std::string* out,
                               std::string* refuse_reason);
 
-// Schema version tag the chunk-3 serializer writes into DuelState.
+// Schema version tag the serializer writes into DuelState.
 // Bump on breaking schema changes; loaders compare against this.
-constexpr uint32_t kSchemaVersion = 1;
+//
+// v2 (chunk-9b, 2026-04-25): adds field.core scratch state (summonable_cards,
+// spsummonable_cards, repositionable_cards, msetable_cards, ssetable_cards,
+// attackable_cards, select_cards, select_cards_codes, unselect_cards,
+// must_select_cards, select_chains, select_effects, select_options,
+// to_bp/to_m2/to_ep/skip_m2, hint_timing, chain_attack/chain_attacker_id)
+// and the Tier 3 ProcessorUnit variants (SelectBattleCmd, SelectChain,
+// SelectCard, SelectCardCodes, SelectUnselectCard, SelectPosition,
+// SelectTributeP, SelectCounter, SelectSum, SortCard, SelectYesNo,
+// SelectEffectYesNo, SelectOption, AnnounceRace/Attribute/Card/Number,
+// RockPaperScissors). Old v1 blobs are NOT migrated — they would silently
+// load with empty card lists which masks the very bug v2 fixes. The loader
+// rejects schema_version != 2 with OCG_LOAD_ERR_SCHEMA_VERSION.
+constexpr uint32_t kSchemaVersion = 2;
 
 }  // namespace ocg::serialize

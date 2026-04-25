@@ -416,6 +416,85 @@ message ProcessorState {
     reserved 10, 11, 12, 13, 14;
     reserved "select_min", "select_max", "select_cancelable",
              "select_hint", "select_card_handles";
+
+    // ── chunk 9b (schema v2): field.processor scratch state ──────────────
+    //
+    // These lists/flags are populated by the previous-step processor (e.g.
+    // IdleCommand::step 0 fills the five card lists + select_chains) and
+    // consumed at step==1 of the corresponding Select* handler. Without
+    // them, OCG_DuelLoadState produces a duel whose validation lists are
+    // all empty, and every legal response is rejected → MSG_RETRY → abort.
+    //
+    // Field numbers 20+ to leave 10-19 reserved for the legacy block. Card
+    // pointers serialize as card_handle (uint32, 0 = nullptr); effect
+    // pointers go through assign_effect_if_live (B1 UAF guard) → 0 if the
+    // effect was freed before save. The loader resolves handles back via
+    // HandleResolver after Pass 3 (effects allocated), Pass 5 (groups),
+    // Pass 9 (player zones populated) — see load_state.cpp.
+
+    // SelectIdleCmd / IdleCommand validation lists (handler reads at
+    // playerop.cpp:141-156). All entries reference cards already in
+    // list_hand or list_mzone, both of which are zone-walked and present
+    // in ht_cards by save time.
+    repeated uint32 summonable_cards = 20;
+    repeated uint32 spsummonable_cards = 21;
+    repeated uint32 repositionable_cards = 22;
+    repeated uint32 msetable_cards = 23;
+    repeated uint32 ssetable_cards = 24;
+
+    // SelectBattleCmd validation list (playerop.cpp:55-67). All entries
+    // are mzone monsters.
+    repeated uint32 attackable_cards = 25;
+
+    // SelectCard / SelectUnselectCard / SelectTributeP / SelectCounter /
+    // SelectSum / SortCard validation list (multiple handlers). Cards
+    // come from arbitrary zones depending on the calling Lua effect; all
+    // are in ht_cards because the zone walk covers every player zone.
+    repeated uint32 select_cards = 26;
+    repeated uint32 unselect_cards = 27;
+    repeated uint32 must_select_cards = 28;
+
+    // SelectCardCodes validation list (playerop.cpp:334-386). Pure
+    // (uint32 code, uint32 info) pair; no card pointer.
+    repeated SelectCardCode select_cards_codes = 29;
+
+    // SelectOption / SelectChain — pure data, no pointers.
+    repeated uint64 select_options = 30;
+
+    // Phase / shuffle gating flags consumed at step 1 by SelectIdleCmd
+    // (to_bp / to_ep / can_shuffle) and SelectBattleCmd (to_m2 / to_ep).
+    // can_shuffle is already in FieldInfo; the others are in `processor`.
+    bool to_bp = 40;
+    bool to_m2 = 41;
+    bool to_ep = 42;
+    bool skip_m2 = 43;
+
+    // SelectChain step==0 emit reads core.hint_timing[playerid] +
+    // core.hint_timing[1-playerid]. Saving at step==0 is rare but the
+    // round-trip semantics demand it (load → SetResponse → re-emit must
+    // produce the same MSG_SELECT_CHAIN bytes). hint_timing[2] in C++.
+    uint32 hint_timing_0 = 44;
+    uint32 hint_timing_1 = 45;
+
+    // Battle-phase chain-attack state. SelectBattleCmd step routing
+    // consults these.
+    bool chain_attack = 46;
+    uint32 chain_attacker_id = 47;
+
+    // ── select_effects ───────────────────────────────────────────────
+    //
+    // SelectEffectYesNo + multi-effect activation paths populate
+    // core.select_effects. All pointers go through assign_effect_if_live
+    // — handle 0 means the effect was freed before save (UAF guard).
+    repeated uint32 select_effects = 50;
+}
+
+// Chunk 9b: SelectCardCodes uses std::vector<std::pair<uint32_t,uint32_t>>
+// where .first is the konami card code and .second carries an info_location
+// flags blob. Both are scalar; no pointer.
+message SelectCardCode {
+    uint32 code = 1;
+    uint32 info = 2;
 }
 
 // Chunk 9a: per-type ProcessorUnit messages mirror the
@@ -449,7 +528,28 @@ message ProcessorUnit {
         // covering 100% of the 57 PROCESSOR_SUBUNIT corpus residual) ──
         ProcSelfDestroy    self_destroy    = 106;
         ProcSelfToGrave    self_to_grave   = 107;
-        // Tier 3 variants add their own field numbers when landed.
+        // ── Tier 3 (chunk 9b, schema v2): every Process<true> Select*
+        // and Announce* variant. With the field.processor scratch state
+        // also serialized (see ProcessorState 20+ above), save→load→
+        // resume now works at any decision boundary in a vanilla duel.
+        ProcSelectBattleCmd    select_battle_cmd      = 108;
+        ProcSelectChain        select_chain           = 109;
+        ProcSelectCard         select_card            = 110;
+        ProcSelectCardCodes    select_card_codes      = 111;
+        ProcSelectUnselectCard select_unselect_card   = 112;
+        ProcSelectPosition     select_position        = 113;
+        ProcSelectTributeP     select_tribute_p       = 114;
+        ProcSelectCounter      select_counter         = 115;
+        ProcSelectSum          select_sum             = 116;
+        ProcSortCard           sort_card              = 117;
+        ProcSelectYesNo        select_yes_no          = 118;
+        ProcSelectEffectYesNo  select_effect_yes_no   = 119;  // carries card*
+        ProcSelectOption       select_option          = 120;
+        ProcAnnounceRace       announce_race          = 121;
+        ProcAnnounceAttribute  announce_attribute     = 122;
+        ProcAnnounceCard       announce_card          = 123;
+        ProcAnnounceNumber     announce_number        = 124;
+        ProcRockPaperScissors  rps                    = 125;
     }
 }
 
@@ -504,6 +604,138 @@ message ProcSelfDestroy {
 
 message ProcSelfToGrave {
     uint32 step = 1;
+}
+
+// ── Tier 3 (chunk 9b, schema v2) ────────────────────────────────────────
+//
+// Each Process<true> variant in processor_unit.h gets its own typed
+// submessage so the loader dispatches on the oneof tag rather than
+// unioning everything into a generic bag of optionals. step is uint16
+// in C++; widened to uint32 here per the convention in Tier 1/2.
+
+message ProcSelectBattleCmd {
+    uint32 step = 1;
+    uint32 playerid = 2;     // uint8 in C++
+}
+
+message ProcSelectChain {
+    uint32 step = 1;
+    uint32 playerid = 2;     // uint8 in C++
+    uint32 spe_count = 3;    // uint8 in C++
+    bool forced = 4;
+}
+
+message ProcSelectCard {
+    uint32 step = 1;
+    uint32 playerid = 2;     // uint8 in C++
+    bool cancelable = 3;
+    uint32 min = 4;          // uint8 in C++
+    uint32 max = 5;          // uint8 in C++
+}
+
+message ProcSelectCardCodes {
+    uint32 step = 1;
+    uint32 playerid = 2;     // uint8 in C++
+    bool cancelable = 3;
+    uint32 min = 4;
+    uint32 max = 5;
+}
+
+message ProcSelectUnselectCard {
+    uint32 step = 1;
+    uint32 playerid = 2;
+    bool cancelable = 3;
+    uint32 min = 4;
+    uint32 max = 5;
+    bool finishable = 6;
+}
+
+message ProcSelectPosition {
+    uint32 step = 1;
+    uint32 playerid = 2;
+    uint32 code = 3;
+    uint32 positions = 4;    // uint8 in C++
+}
+
+message ProcSelectTributeP {
+    uint32 step = 1;
+    uint32 playerid = 2;
+    bool cancelable = 3;
+    uint32 min = 4;
+    uint32 max = 5;
+}
+
+message ProcSelectCounter {
+    uint32 step = 1;
+    uint32 playerid = 2;
+    uint32 countertype = 3;  // uint16 in C++
+    uint32 count = 4;        // uint16 in C++
+    uint32 self = 5;         // uint8 in C++
+    uint32 oppo = 6;         // uint8 in C++
+}
+
+message ProcSelectSum {
+    uint32 step = 1;
+    uint32 playerid = 2;
+    int32 acc = 3;
+    int32 min = 4;
+    int32 max = 5;
+}
+
+message ProcSortCard {
+    uint32 step = 1;
+    uint32 playerid = 2;
+    bool is_chain = 3;
+}
+
+message ProcSelectYesNo {
+    uint32 step = 1;
+    uint32 playerid = 2;
+    uint64 description = 3;
+}
+
+// SelectEffectYesNo carries a `card* pcard` field — the only Tier 3
+// variant with a pointer. Serialize via card_handle (0 = nullptr).
+message ProcSelectEffectYesNo {
+    uint32 step = 1;
+    uint32 playerid = 2;
+    uint32 pcard_handle = 3;
+    uint64 description = 4;
+}
+
+message ProcSelectOption {
+    uint32 step = 1;
+    uint32 playerid = 2;
+}
+
+message ProcAnnounceRace {
+    uint32 step = 1;
+    uint32 playerid = 2;
+    uint32 count = 3;        // uint8 in C++
+    uint64 available = 4;
+}
+
+message ProcAnnounceAttribute {
+    uint32 step = 1;
+    uint32 playerid = 2;
+    uint32 count = 3;
+    uint32 available = 4;
+}
+
+message ProcAnnounceCard {
+    uint32 step = 1;
+    uint32 playerid = 2;
+}
+
+message ProcAnnounceNumber {
+    uint32 step = 1;
+    uint32 playerid = 2;
+}
+
+message ProcRockPaperScissors {
+    uint32 step = 1;
+    bool repeat = 2;
+    uint32 hand0 = 3;        // uint8 in C++
 }
 
 // ---------------------------------------------------------------------------

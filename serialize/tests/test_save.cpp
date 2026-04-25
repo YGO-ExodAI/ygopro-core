@@ -167,7 +167,7 @@ bool test_blob_parses_with_expected_shape() {
                "parse blob");
 
     // Schema header
-    CHECK_EQ(parsed.schema_version(), 1u, "schema_version");
+    CHECK_EQ(parsed.schema_version(), 2u, "schema_version");
     CHECK_EQ(parsed.timestamp_unix(), 0ull,
              "timestamp_unix is fixed at 0 (deterministic)");
     CHECK_EQ(parsed.save_safety(), ocg::state::DuelState::SAVE_SAFETY_OK,
@@ -548,7 +548,7 @@ bool test_load_wrong_schema_version() {
 bool test_load_refuse_tag() {
     // Build a syntactically-valid blob tagged save_safety=REFUSE.
     ocg::state::DuelState s;
-    s.set_schema_version(1);
+    s.set_schema_version(2);
     s.set_save_safety(ocg::state::DuelState::SAVE_SAFETY_REFUSE);
     s.set_refuse_reason("test fixture");
     auto* rng = s.mutable_rng();

@@ -261,10 +261,11 @@ bool restore_effect_callback(const pb::LuaCallback& src, int32_t* dst_ref,
     return true;
 }
 
-// Chunk 9a Tier 1+2: ProcessorState load. Materializes core.units
-// (Tier 1 variants) and core.subunits (Tier 2 variants) from the
-// saved per-type messages. Per-list dispatcher reuses the variant
-// switch since both lists are std::list<processor_unit>.
+// Chunk 9a Tier 1+2 / 9b Tier 3: ProcessorState load. Materializes
+// core.units (Tier 1 variants) and core.subunits (Tier 2 variants) and
+// the Tier 3 Process<true> variants from the saved per-type messages.
+// Per-list dispatcher reuses the variant switch since both lists are
+// std::list<processor_unit>.
 //
 // Returns true on success, false (with load_error filled) on malformed
 // data or unknown-tier variant.
@@ -351,6 +352,172 @@ bool load_processor_unit_into(
                 dst, static_cast<uint16_t>(m.step()));
             return true;
         }
+        // ── Tier 3 (chunk 9b) ───────────────────────────────────
+        case ocg::state::ProcessorUnit::kSelectBattleCmd: {
+            const auto& m = src_unit.select_battle_cmd();
+            Processors::emplace_variant<Processors::SelectBattleCmd>(
+                dst, static_cast<uint16_t>(m.step()),
+                static_cast<uint8_t>(m.playerid()));
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kSelectChain: {
+            const auto& m = src_unit.select_chain();
+            Processors::emplace_variant<Processors::SelectChain>(
+                dst, static_cast<uint16_t>(m.step()),
+                static_cast<uint8_t>(m.playerid()),
+                static_cast<uint8_t>(m.spe_count()),
+                m.forced());
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kSelectCard: {
+            const auto& m = src_unit.select_card();
+            Processors::emplace_variant<Processors::SelectCard>(
+                dst, static_cast<uint16_t>(m.step()),
+                static_cast<uint8_t>(m.playerid()),
+                m.cancelable(),
+                static_cast<uint8_t>(m.min()),
+                static_cast<uint8_t>(m.max()));
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kSelectCardCodes: {
+            const auto& m = src_unit.select_card_codes();
+            Processors::emplace_variant<Processors::SelectCardCodes>(
+                dst, static_cast<uint16_t>(m.step()),
+                static_cast<uint8_t>(m.playerid()),
+                m.cancelable(),
+                static_cast<uint8_t>(m.min()),
+                static_cast<uint8_t>(m.max()));
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kSelectUnselectCard: {
+            const auto& m = src_unit.select_unselect_card();
+            Processors::emplace_variant<Processors::SelectUnselectCard>(
+                dst, static_cast<uint16_t>(m.step()),
+                static_cast<uint8_t>(m.playerid()),
+                m.cancelable(),
+                static_cast<uint8_t>(m.min()),
+                static_cast<uint8_t>(m.max()),
+                m.finishable());
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kSelectPosition: {
+            const auto& m = src_unit.select_position();
+            Processors::emplace_variant<Processors::SelectPosition>(
+                dst, static_cast<uint16_t>(m.step()),
+                static_cast<uint8_t>(m.playerid()),
+                m.code(),
+                static_cast<uint8_t>(m.positions()));
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kSelectTributeP: {
+            const auto& m = src_unit.select_tribute_p();
+            Processors::emplace_variant<Processors::SelectTributeP>(
+                dst, static_cast<uint16_t>(m.step()),
+                static_cast<uint8_t>(m.playerid()),
+                m.cancelable(),
+                static_cast<uint8_t>(m.min()),
+                static_cast<uint8_t>(m.max()));
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kSelectCounter: {
+            const auto& m = src_unit.select_counter();
+            Processors::emplace_variant<Processors::SelectCounter>(
+                dst, static_cast<uint16_t>(m.step()),
+                static_cast<uint8_t>(m.playerid()),
+                static_cast<uint16_t>(m.countertype()),
+                static_cast<uint16_t>(m.count()),
+                static_cast<uint8_t>(m.self()),
+                static_cast<uint8_t>(m.oppo()));
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kSelectSum: {
+            const auto& m = src_unit.select_sum();
+            Processors::emplace_variant<Processors::SelectSum>(
+                dst, static_cast<uint16_t>(m.step()),
+                static_cast<uint8_t>(m.playerid()),
+                m.acc(), m.min(), m.max());
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kSortCard: {
+            const auto& m = src_unit.sort_card();
+            Processors::emplace_variant<Processors::SortCard>(
+                dst, static_cast<uint16_t>(m.step()),
+                static_cast<uint8_t>(m.playerid()),
+                m.is_chain());
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kSelectYesNo: {
+            const auto& m = src_unit.select_yes_no();
+            Processors::emplace_variant<Processors::SelectYesNo>(
+                dst, static_cast<uint16_t>(m.step()),
+                static_cast<uint8_t>(m.playerid()),
+                m.description());
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kSelectEffectYesNo: {
+            const auto& m = src_unit.select_effect_yes_no();
+            // SelectEffectYesNo carries a card* — resolve via hc. h==0
+            // → nullptr (which is what new SelectEffectYesNo() expects
+            // for the absent case; the engine's emit will then produce
+            // a deterministic but functionally-degenerate prompt).
+            card* pcard = hc.lookup(m.pcard_handle());
+            Processors::emplace_variant<Processors::SelectEffectYesNo>(
+                dst, static_cast<uint16_t>(m.step()),
+                static_cast<uint8_t>(m.playerid()),
+                m.description(),
+                pcard);
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kSelectOption: {
+            const auto& m = src_unit.select_option();
+            Processors::emplace_variant<Processors::SelectOption>(
+                dst, static_cast<uint16_t>(m.step()),
+                static_cast<uint8_t>(m.playerid()));
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kAnnounceRace: {
+            const auto& m = src_unit.announce_race();
+            Processors::emplace_variant<Processors::AnnounceRace>(
+                dst, static_cast<uint16_t>(m.step()),
+                static_cast<uint8_t>(m.playerid()),
+                static_cast<uint8_t>(m.count()),
+                m.available());
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kAnnounceAttribute: {
+            const auto& m = src_unit.announce_attribute();
+            Processors::emplace_variant<Processors::AnnounceAttribute>(
+                dst, static_cast<uint16_t>(m.step()),
+                static_cast<uint8_t>(m.playerid()),
+                static_cast<uint8_t>(m.count()),
+                m.available());
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kAnnounceCard: {
+            const auto& m = src_unit.announce_card();
+            Processors::emplace_variant<Processors::AnnounceCard>(
+                dst, static_cast<uint16_t>(m.step()),
+                static_cast<uint8_t>(m.playerid()));
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kAnnounceNumber: {
+            const auto& m = src_unit.announce_number();
+            Processors::emplace_variant<Processors::AnnounceNumber>(
+                dst, static_cast<uint16_t>(m.step()),
+                static_cast<uint8_t>(m.playerid()));
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kRps: {
+            const auto& m = src_unit.rps();
+            Processors::emplace_variant<Processors::RockPaperScissors>(
+                dst, static_cast<uint16_t>(m.step()),
+                m.repeat());
+            if (auto* p = Processors::get_opt_variant<Processors::RockPaperScissors>(
+                    dst.back())) {
+                p->hand0 = static_cast<uint8_t>(m.hand0());
+            }
+            return true;
+        }
         case ocg::state::ProcessorUnit::UNIT_NOT_SET:
             if (load_error) {
                 *load_error = "ProcessorUnit in '" +
@@ -365,15 +532,87 @@ bool load_processor_unit_into(
                               std::string(list_name) + "' at index " +
                               std::to_string(idx) + " has variant case (" +
                               std::to_string(src_unit.unit_case()) +
-                              ") not handled by this loader (Tier 3+)";
+                              ") not handled by this loader (Process<false> "
+                              "non-Select variants — BattleCommand, Destroy, "
+                              "Release, etc. — wait on their own pass).";
             }
             return false;
+    }
+}
+
+// Chunk 9b: load field.processor scratch state. Mirror of
+// write_processor_scratch. Pointer fields resolve through
+// HandleResolver<card>/effect; handle 0 → nullptr (variable-zone
+// entries can carry empties because save-side already filtered, but
+// we let the engine sort it out — load is a faithful reproduction).
+void load_processor_scratch(const ocg::state::ProcessorState& src,
+                             processor& core,
+                             const HandleResolver<card>& hc,
+                             const HandleResolver<effect>& he) {
+    auto fill_card_vec = [&](card_vector& dst, const auto& src_handles) {
+        dst.clear();
+        dst.reserve(src_handles.size());
+        for (uint32_t h : src_handles) {
+            if (card* c = hc.lookup(h)) dst.push_back(c);
+        }
+    };
+    fill_card_vec(core.summonable_cards,    src.summonable_cards());
+    fill_card_vec(core.spsummonable_cards,  src.spsummonable_cards());
+    fill_card_vec(core.repositionable_cards,src.repositionable_cards());
+    fill_card_vec(core.msetable_cards,      src.msetable_cards());
+    fill_card_vec(core.ssetable_cards,      src.ssetable_cards());
+    fill_card_vec(core.attackable_cards,    src.attackable_cards());
+    fill_card_vec(core.select_cards,        src.select_cards());
+    fill_card_vec(core.unselect_cards,      src.unselect_cards());
+    fill_card_vec(core.must_select_cards,   src.must_select_cards());
+
+    core.select_cards_codes.clear();
+    core.select_cards_codes.reserve(src.select_cards_codes_size());
+    for (const auto& p : src.select_cards_codes()) {
+        core.select_cards_codes.emplace_back(p.code(), p.info());
+    }
+
+    core.select_options.clear();
+    for (uint64_t opt : src.select_options()) core.select_options.push_back(opt);
+
+    core.select_effects.clear();
+    for (uint32_t h : src.select_effects()) {
+        if (effect* e = he.lookup(h)) core.select_effects.push_back(e);
+    }
+
+    core.to_bp = src.to_bp();
+    core.to_m2 = src.to_m2();
+    core.to_ep = src.to_ep();
+    core.skip_m2 = src.skip_m2();
+    core.hint_timing[0] = src.hint_timing_0();
+    core.hint_timing[1] = src.hint_timing_1();
+    core.chain_attack = src.chain_attack();
+    core.chain_attacker_id = src.chain_attacker_id();
+}
+
+// Chunk 9b: load select_chains. Mirror of write_select_chains.
+// PendingChain only carries chain_id, triggering_player,
+// triggering_effect_handle — sufficient for step==1 size check and
+// step==1 dispatch (the handler reads chain.triggering_effect for
+// activation). Other chain fields (triggering_card, target_player,
+// flag, …) default-construct.
+void load_select_chains(const ocg::state::ChainStack& src,
+                         processor& core,
+                         const HandleResolver<effect>& he) {
+    core.select_chains.clear();
+    for (const auto& p : src.select_chains()) {
+        core.select_chains.emplace_back();
+        chain& dst = core.select_chains.back();
+        dst.chain_id = static_cast<uint16_t>(p.chain_id());
+        dst.triggering_player = static_cast<uint8_t>(p.triggering_player());
+        dst.triggering_effect = he.lookup(p.triggering_effect_handle());
     }
 }
 
 bool load_processor_state(const ocg::state::ProcessorState& src,
                            processor& core,
                            HandleResolver<card>& hc,
+                           const HandleResolver<effect>& he,
                            std::string* load_error) {
     core.units.clear();
     for (int i = 0; i < src.units_size(); ++i) {
@@ -389,6 +628,7 @@ bool load_processor_state(const ocg::state::ProcessorState& src,
             return false;
         }
     }
+    load_processor_scratch(src, core, hc, he);
     return true;
 }
 
@@ -507,10 +747,20 @@ OCG_LoadStatus deserialize_duel(const void* buffer, std::size_t size,
     prof.mark("proto_parse");
 
     if (state.schema_version() != kSchemaVersion) {
+        // chunk-9b: v1 → v2 bumped because v1 blobs lacked field.core
+        // scratch state (summonable_cards, select_chains, etc.). Loading
+        // a v1 blob through a v2 engine would silently produce a duel
+        // with empty validation lists at SelectIdleCmd::step==1, which
+        // is the exact crash the v2 schema fixes. Hard-fail with a
+        // re-record instruction rather than letting it through.
         *load_error =
-            "schema_version " + std::to_string(state.schema_version()) +
-            " not supported by this ocgcore (expected " +
-            std::to_string(kSchemaVersion) + ")";
+            "save file schema version " +
+            std::to_string(state.schema_version()) +
+            " is incompatible with engine schema version " +
+            std::to_string(kSchemaVersion) +
+            "; re-record your save (no migration path is supplied — "
+            "v1 blobs would silently load with empty Select* validation "
+            "state)";
         return OCG_LOAD_ERR_SCHEMA_VERSION;
     }
 
@@ -680,7 +930,9 @@ OCG_LoadStatus deserialize_duel(const void* buffer, std::size_t size,
     }
 
     // -----------------------------------------------------------------
-    // Pass 7: load chain links (current_chain).
+    // Pass 7: load chain links (current_chain) + select_chains.
+    // chunk 9b: select_chains references effect handles only — pass 7
+    // is the right place since effects exist by pass 4.
     // -----------------------------------------------------------------
     if (d->game_field != nullptr && state.has_chain()) {
         d->game_field->core.current_chain.clear();
@@ -689,6 +941,7 @@ OCG_LoadStatus deserialize_duel(const void* buffer, std::size_t size,
             load_chain_link(link_pb, &d->game_field->core.current_chain.back(),
                             hc, he, hg);
         }
+        load_select_chains(state.chain(), d->game_field->core, he);
     }
 
     // -----------------------------------------------------------------
@@ -719,13 +972,19 @@ OCG_LoadStatus deserialize_duel(const void* buffer, std::size_t size,
     }
 
     // -----------------------------------------------------------------
-    // Pass 10 (chunk 9a Tier 1): ProcessorState. Materializes
-    // core.units from the saved per-type messages. Subunits + chain_lists
-    // are Tier 2; on this path they stay default-empty.
+    // Pass 10 (chunk 9a Tier 1+2 / 9b Tier 3 + scratch): ProcessorState.
+    // Materializes core.units / core.subunits from the saved per-type
+    // messages, then fills the field.processor scratch state
+    // (summonable_cards, select_chains-equivalent, to_bp/to_ep, etc.)
+    // that step==1 of every Select* handler validates against.
+    //
+    // Pass ordering: must follow Pass 1 (cards), Pass 3 (effects),
+    // Pass 9 (player zones — cards must be assigned to zones before
+    // scratch lookups; many scratch entries are zone references).
     // -----------------------------------------------------------------
     if (d->game_field != nullptr && state.has_processor()) {
         if (!load_processor_state(state.processor(),
-                                   d->game_field->core, hc, load_error)) {
+                                   d->game_field->core, hc, he, load_error)) {
             for (uint32_t i = 1; i <= state.cards_size(); ++i) {
                 if (card* c = hc.lookup(i)) d->delete_card(c);
             }
