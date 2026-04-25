@@ -17,10 +17,14 @@
 // (pokes interpreter::call_depth directly) and for the chunk-4 load
 // tests that mutate field_info / player[] on the duel before saving.
 // Static-lib linkage makes the symbols visible to the test binary.
+#include "card.h"      // chunk 9b: card.cardid / data.code access in tests
 #include "duel.h"
+#include "effect.h"    // chunk 9b: effect scalar field assignment in tests
 #include "field.h"
 #include "interpreter.h"
+#include "processor_unit.h"  // chunk 9b: emplace_variant / get_opt_variant
 #include "serialize/save_state.h"  // for direct refuse-reason inspection
+#include "serialize/load_state.h"  // for direct deserialize_duel inspection (chunk 9b)
 
 #include <algorithm>
 #include <cassert>
@@ -1769,6 +1773,572 @@ bool test_chunk5b_hydor_msg_stream() {
 }
 
 // ---------------------------------------------------------------------------
+// CHUNK 9b: regression test suite for the smoke-test abort fix.
+//
+// Pre-9b, save→load at any Select* decision boundary produced a duel
+// with empty validation lists (summonable_cards / select_chains / etc.
+// are populated by the previous-step processor and live in
+// field.processor — which chunk-9a never serialized). Post-load
+// SetResponse + Process tripped MSG_RETRY → unhandled std::runtime_error
+// → std::terminate from envpool's worker thread.
+//
+// These tests verify:
+//   1. The smoke-test abort scenario itself: save → load → SetResponse
+//      → Process → no MSG_RETRY emitted (the headline fix).
+//   2. field.processor scratch fields round-trip with handle resolution.
+//   3. select_chains save honours the B1 UAF guard
+//      (assign_effect_if_live) so a dead-effect chain is dropped to
+//      handle 0 instead of dereferencing freed memory.
+//   4. v1 blobs are rejected with a re-record instruction (not silently
+//      loaded with empty Select* state — which would mask the bug).
+//   5. Synthetic round-trip of Tier 3 ProcessorUnit variants
+//      (SelectChain etc.) — the proto/save/load wiring is correct
+//      independent of whether the YugiKaiba corpus surfaces them.
+// ---------------------------------------------------------------------------
+
+// Scan a generate_buffer-format byte stream for MSG_RETRY (=1). Format
+// per duel::generate_buffer: each message is [uint32 size][size bytes
+// where bytes[0] = msg_type, bytes[1..] = payload].
+bool stream_has_msg_retry(const std::vector<uint8_t>& bytes) {
+    size_t pos = 0;
+    while (pos + 4 <= bytes.size()) {
+        uint32_t sz = 0;
+        std::memcpy(&sz, &bytes[pos], 4);
+        pos += 4;
+        if (sz == 0 || pos + sz > bytes.size()) break;
+        if (bytes[pos] == MSG_RETRY) return true;
+        pos += sz;
+    }
+    return false;
+}
+
+// Find the offset (start of size header) of the first MSG_SELECT_IDLECMD
+// in a generate_buffer stream, or std::string::npos if not present.
+// The scratch-list bug surfaces specifically at this prompt — finding
+// it in the orig stream confirms the fixture genuinely reaches the
+// failure mode the eval described.
+size_t stream_find_msg(const std::vector<uint8_t>& bytes, uint8_t msg_type) {
+    size_t pos = 0;
+    while (pos + 4 <= bytes.size()) {
+        uint32_t sz = 0;
+        std::memcpy(&sz, &bytes[pos], 4);
+        const size_t header_pos = pos;
+        pos += 4;
+        if (sz == 0 || pos + sz > bytes.size()) break;
+        if (bytes[pos] == msg_type) return header_pos;
+        pos += sz;
+    }
+    return std::string::npos;
+}
+
+// Headline regression test: drive a vanilla deck through StartDuel into
+// the first SelectIdleCmd::step==1 pause. Save, load. SetResponse with
+// the to-EP action (t=7, which validates against core.to_ep — an
+// otherwise-empty processor field that v1 dropped). Process. Assert
+// no MSG_RETRY. Pre-9b this would terminate; post-9b it advances.
+bool test_chunk9b_save_load_step_no_msg_retry() {
+    constexpr uint64_t kSeed = 0x9B01ULL;
+
+    OCG_Duel orig = make_chunk5a_duel(kSeed);
+    CHECK_TRUE(orig != nullptr, "create orig");
+    populate_simple_deck(orig);
+    OCG_StartDuel(orig);
+    auto stream_orig = drive_to_first_pause(orig);
+    CHECK_TRUE(!stream_orig.empty(), "orig produced non-empty stream");
+
+    // Confirm the fixture actually reaches a SelectIdleCmd prompt.
+    // If the stream doesn't contain MSG_SELECT_IDLECMD, the simple-deck
+    // first-turn path may have changed and the test isn't probing the
+    // bug surface anymore — fail loudly so it's diagnosed not silently
+    // skipped.
+    CHECK_TRUE(
+        stream_find_msg(stream_orig, MSG_SELECT_IDLECMD) != std::string::npos,
+        "orig stream contains MSG_SELECT_IDLECMD (paused at idle prompt)");
+
+    auto* d_orig = static_cast<duel*>(orig);
+    // At step==1 of SelectIdleCmd, core.to_ep is set (vanilla MP1 turn).
+    // If it isn't, the test's chosen action below would itself
+    // legitimately MSG_RETRY — fail before that confuses diagnosis.
+    CHECK_TRUE(d_orig->game_field != nullptr, "orig game_field");
+    CHECK_TRUE(d_orig->game_field->core.to_ep,
+               "orig core.to_ep is set at SelectIdleCmd boundary");
+
+    void* blob = nullptr;
+    uint32_t size = 0;
+    CHECK_EQ(OCG_DuelSaveState(orig, &blob, &size), OCG_SAVE_OK,
+             "save at SelectIdleCmd boundary");
+
+    OCG_DuelOptions opts = make_chunk5a_load_options();
+    OCG_Duel loaded = nullptr;
+    CHECK_EQ(OCG_DuelLoadState(blob, size, &opts, &loaded), OCG_LOAD_OK,
+             "load");
+
+    auto* d_loaded = static_cast<duel*>(loaded);
+    CHECK_TRUE(d_loaded->game_field != nullptr, "loaded game_field");
+    CHECK_TRUE(d_loaded->game_field->core.to_ep,
+               "loaded core.to_ep restored (chunk 9b: was always false pre-fix)");
+
+    // SelectIdleCmd response encoding: low 16 bits = command type t,
+    // high 16 bits = sub-index s. t=7 → To-EP. No s needed.
+    int32_t response = 7;
+    OCG_DuelSetResponse(loaded, &response, sizeof(response));
+
+    // Drain Process; MSG_RETRY would appear here pre-9b. Cap iterations
+    // so a regression in load doesn't infinite-loop the test.
+    std::vector<uint8_t> stream_loaded;
+    for (int iter = 0; iter < 1000; ++iter) {
+        const int status = OCG_DuelProcess(loaded);
+        uint32_t len = 0;
+        void* msgs = OCG_DuelGetMessage(loaded, &len);
+        if (msgs && len > 0) {
+            const uint8_t* p = static_cast<const uint8_t*>(msgs);
+            stream_loaded.insert(stream_loaded.end(), p, p + len);
+        }
+        if (status == OCG_DUEL_STATUS_END ||
+            status == OCG_DUEL_STATUS_AWAITING) {
+            break;
+        }
+    }
+
+    if (stream_has_msg_retry(stream_loaded)) {
+        std::fprintf(stderr,
+            "FAIL: post-load Step emitted MSG_RETRY — chunk-9b regression. "
+            "Loaded duel rejected the t=7 (to_ep) response that v2 schema "
+            "is supposed to make valid by restoring core.to_ep / "
+            "core.summonable_cards / core.select_chains.\n");
+        OCG_FreeSaveBuffer(blob);
+        OCG_DestroyDuel(orig);
+        OCG_DestroyDuel(loaded);
+        return false;
+    }
+
+    OCG_FreeSaveBuffer(blob);
+    OCG_DestroyDuel(orig);
+    OCG_DestroyDuel(loaded);
+    return true;
+}
+
+// Verify field.processor scratch fields round-trip *semantically* (not
+// just byte-equal — that's covered by chunk9a_processor_state_round_trip).
+// At the SelectIdleCmd boundary, summonable_cards may be empty for the
+// vanilla-monster fixture (no special-summon-procedure-having cards in
+// hand), but core.to_ep / core.to_bp / core.hint_timing should match.
+bool test_chunk9b_processor_scratch_semantic_round_trip() {
+    constexpr uint64_t kSeed = 0x9B02ULL;
+
+    OCG_Duel orig = make_chunk5a_duel(kSeed);
+    CHECK_TRUE(orig != nullptr, "create orig");
+    populate_simple_deck(orig);
+    OCG_StartDuel(orig);
+    drive_to_first_pause(orig);
+
+    auto* d_orig = static_cast<duel*>(orig);
+    const auto& core_orig = d_orig->game_field->core;
+    const bool   orig_to_bp        = core_orig.to_bp;
+    const bool   orig_to_m2        = core_orig.to_m2;
+    const bool   orig_to_ep        = core_orig.to_ep;
+    const bool   orig_skip_m2      = core_orig.skip_m2;
+    const uint32_t orig_ht0        = core_orig.hint_timing[0];
+    const uint32_t orig_ht1        = core_orig.hint_timing[1];
+    const size_t orig_summ_n       = core_orig.summonable_cards.size();
+    const size_t orig_spsumm_n     = core_orig.spsummonable_cards.size();
+    const size_t orig_repos_n      = core_orig.repositionable_cards.size();
+    const size_t orig_mset_n       = core_orig.msetable_cards.size();
+    const size_t orig_sset_n       = core_orig.ssetable_cards.size();
+    const size_t orig_sel_chains_n = core_orig.select_chains.size();
+
+    void* blob = nullptr;
+    uint32_t size = 0;
+    CHECK_EQ(OCG_DuelSaveState(orig, &blob, &size), OCG_SAVE_OK, "save");
+
+    OCG_DuelOptions opts = make_chunk5a_load_options();
+    OCG_Duel loaded = nullptr;
+    CHECK_EQ(OCG_DuelLoadState(blob, size, &opts, &loaded), OCG_LOAD_OK,
+             "load");
+
+    auto* d_loaded = static_cast<duel*>(loaded);
+    const auto& core_loaded = d_loaded->game_field->core;
+    CHECK_EQ(core_loaded.to_bp,         orig_to_bp,        "to_bp");
+    CHECK_EQ(core_loaded.to_m2,         orig_to_m2,        "to_m2");
+    CHECK_EQ(core_loaded.to_ep,         orig_to_ep,        "to_ep");
+    CHECK_EQ(core_loaded.skip_m2,       orig_skip_m2,      "skip_m2");
+    CHECK_EQ(core_loaded.hint_timing[0], orig_ht0,         "hint_timing[0]");
+    CHECK_EQ(core_loaded.hint_timing[1], orig_ht1,         "hint_timing[1]");
+    CHECK_EQ(core_loaded.summonable_cards.size(),    orig_summ_n,
+             "summonable_cards size");
+    CHECK_EQ(core_loaded.spsummonable_cards.size(),  orig_spsumm_n,
+             "spsummonable_cards size");
+    CHECK_EQ(core_loaded.repositionable_cards.size(),orig_repos_n,
+             "repositionable_cards size");
+    CHECK_EQ(core_loaded.msetable_cards.size(),      orig_mset_n,
+             "msetable_cards size");
+    CHECK_EQ(core_loaded.ssetable_cards.size(),      orig_sset_n,
+             "ssetable_cards size");
+    CHECK_EQ(core_loaded.select_chains.size(),       orig_sel_chains_n,
+             "select_chains size");
+
+    OCG_FreeSaveBuffer(blob);
+    OCG_DestroyDuel(orig);
+    OCG_DestroyDuel(loaded);
+    return true;
+}
+
+// Synthetically populate summonable_cards + select_chains, save, load,
+// verify the entries resolved back to the right cards / effects (by
+// cardid / initial_id, since pointer values won't match cross-allocation).
+bool test_chunk9b_synthetic_scratch_round_trip() {
+    OCG_Duel orig = make_chunk5a_duel(0x9B03);
+    CHECK_TRUE(orig != nullptr, "create orig");
+    populate_simple_deck(orig);
+
+    auto* d_orig = static_cast<duel*>(orig);
+    auto& core_orig = d_orig->game_field->core;
+
+    // Pick three cards from p0 deck. Push them into summonable_cards
+    // and msetable_cards. Capture cardids for post-load identity.
+    CHECK_TRUE(d_orig->game_field->player[0].list_main.size() >= 3,
+               "need 3 cards");
+    card* a = d_orig->game_field->player[0].list_main[0];
+    card* b = d_orig->game_field->player[0].list_main[1];
+    card* c = d_orig->game_field->player[0].list_main[2];
+    const uint32_t a_id = a->cardid;
+    const uint32_t b_id = b->cardid;
+    const uint32_t c_id = c->cardid;
+    core_orig.summonable_cards.push_back(a);
+    core_orig.summonable_cards.push_back(b);
+    core_orig.msetable_cards.push_back(c);
+    core_orig.select_options.push_back(0xCAFE);
+    core_orig.select_options.push_back(0xBEEF);
+    core_orig.to_bp = true;
+    core_orig.to_m2 = false;
+    core_orig.to_ep = true;
+    core_orig.hint_timing[0] = 0x12345678;
+    core_orig.hint_timing[1] = 0xAABBCCDD;
+
+    void* blob = nullptr;
+    uint32_t size = 0;
+    CHECK_EQ(OCG_DuelSaveState(orig, &blob, &size), OCG_SAVE_OK, "save");
+
+    OCG_DuelOptions opts = make_chunk5a_load_options();
+    OCG_Duel loaded = nullptr;
+    CHECK_EQ(OCG_DuelLoadState(blob, size, &opts, &loaded), OCG_LOAD_OK,
+             "load");
+
+    auto* d_loaded = static_cast<duel*>(loaded);
+    const auto& core_loaded = d_loaded->game_field->core;
+
+    CHECK_EQ(core_loaded.summonable_cards.size(), 2u, "summonable_cards size");
+    CHECK_EQ(core_loaded.summonable_cards[0]->cardid, a_id, "summ[0] cardid");
+    CHECK_EQ(core_loaded.summonable_cards[1]->cardid, b_id, "summ[1] cardid");
+    CHECK_EQ(core_loaded.msetable_cards.size(),    1u, "msetable size");
+    CHECK_EQ(core_loaded.msetable_cards[0]->cardid, c_id, "msetable[0]");
+    CHECK_EQ(core_loaded.select_options.size(),   2u, "select_options size");
+    CHECK_EQ(core_loaded.select_options[0], 0xCAFEull, "select_options[0]");
+    CHECK_EQ(core_loaded.select_options[1], 0xBEEFull, "select_options[1]");
+    CHECK_EQ(core_loaded.to_bp, true,               "to_bp");
+    CHECK_EQ(core_loaded.to_m2, false,              "to_m2");
+    CHECK_EQ(core_loaded.to_ep, true,               "to_ep");
+    CHECK_EQ(core_loaded.hint_timing[0], 0x12345678u, "hint_timing[0]");
+    CHECK_EQ(core_loaded.hint_timing[1], 0xAABBCCDDu, "hint_timing[1]");
+
+    OCG_FreeSaveBuffer(blob);
+    OCG_DestroyDuel(orig);
+    OCG_DestroyDuel(loaded);
+    return true;
+}
+
+// B1 regression. Populate select_chains with a synthetic chain whose
+// triggering_effect was deleted via duel.delete_effect (which doesn't
+// scrub the chain's effect pointer). assign_effect_if_live must catch
+// this and write handle 0 — same shape as the original B1 UAF guard
+// for chain::triggering_effect / card_state::reason_effect. If the
+// guard fires, save returns OK with no UAF and the loaded blob has
+// triggering_effect == nullptr (the effect simply doesn't exist on
+// the load side, so this is the correct semantic).
+bool test_chunk9b_select_chains_freed_effect_dropped() {
+    OCG_Duel orig = make_chunk5a_duel(0x9B04);
+    CHECK_TRUE(orig != nullptr, "create orig");
+    populate_simple_deck(orig);
+
+    auto* d_orig = static_cast<duel*>(orig);
+
+    // Allocate a fresh effect via duel::new_effect, attach to the
+    // first p0 card, then push a chain referencing it. Then delete
+    // the effect (mimicking mid-resolution cleanup paths the engine
+    // takes).
+    effect* e = d_orig->new_effect();
+    e->initial_id = 0xBADC0DE;
+    e->id = 0xBADC0DE;
+    card* owner = d_orig->game_field->player[0].list_main[0];
+    e->owner = owner;
+    e->handler = owner;
+    owner->single_effect.emplace(0x100, e);
+
+    chain c{};
+    c.chain_id = 99;
+    c.triggering_player = 0;
+    c.triggering_effect = e;
+    d_orig->game_field->core.select_chains.push_back(c);
+
+    // Now free the effect. The chain's pointer is now dangling; B1's
+    // assign_effect_if_live should catch it via the live_effects set.
+    d_orig->delete_effect(e);
+
+    void* blob = nullptr;
+    uint32_t size = 0;
+    int s = OCG_DuelSaveState(orig, &blob, &size);
+    CHECK_EQ(s, OCG_SAVE_OK,
+             "save with freed-effect chain — guard kicks in, no UAF");
+    CHECK_TRUE(size > 0, "non-empty blob");
+
+    OCG_DuelOptions opts = make_chunk5a_load_options();
+    OCG_Duel loaded = nullptr;
+    CHECK_EQ(OCG_DuelLoadState(blob, size, &opts, &loaded), OCG_LOAD_OK,
+             "load");
+
+    auto* d_loaded = static_cast<duel*>(loaded);
+    CHECK_EQ(d_loaded->game_field->core.select_chains.size(), 1u,
+             "select_chains entry preserved");
+    // Effect handle was 0 (dropped) → load resolves to nullptr.
+    CHECK_TRUE(
+        d_loaded->game_field->core.select_chains.front().triggering_effect == nullptr,
+        "loaded chain.triggering_effect is nullptr (B1 guard fired)");
+
+    OCG_FreeSaveBuffer(blob);
+    OCG_DestroyDuel(orig);
+    OCG_DestroyDuel(loaded);
+    return true;
+}
+
+// Verify the v1→v2 schema bump is loud, not silent. A blob tagged v1
+// must be rejected with a re-record instruction. (load_wrong_schema_version
+// already covers v=999 → REJECT; this test specifically pins the
+// pre-fix v=1 case which is the realistic regression the bump
+// guards against.)
+bool test_chunk9b_v1_blob_rejected_loud() {
+    ocg::state::DuelState s;
+    s.set_schema_version(1);  // pre-fix value
+    auto* rng = s.mutable_rng();
+    for (int i = 0; i < 4; ++i) rng->add_xoshiro_state(0);
+    s.add_players()->set_lp(8000);
+    s.add_players()->set_lp(8000);
+    s.mutable_field_info();
+    std::string bytes;
+    CHECK_TRUE(s.SerializeToString(&bytes), "serialize v1 blob");
+
+    OCG_DuelOptions opts = make_chunk5a_load_options();
+    OCG_Duel out = nullptr;
+    int status = OCG_DuelLoadState(bytes.data(),
+                                   static_cast<uint32_t>(bytes.size()),
+                                   &opts, &out);
+    CHECK_EQ(status, OCG_LOAD_ERR_SCHEMA_VERSION,
+             "v1 blob rejected with SCHEMA_VERSION error");
+    CHECK_TRUE(out == nullptr, "no duel allocated");
+
+    // Direct serialize_duel call to introspect the load_error message
+    // (the public ABI returns only the status code; the loud-message
+    // assertion goes through the internal entry point, mirrored from
+    // test_load_wrong_schema_version's pattern).
+    {
+        std::string load_error;
+        duel* d = nullptr;
+        OCG_LoadStatus s2 = ocg::serialize::deserialize_duel(
+            bytes.data(), bytes.size(), opts, &d, &load_error);
+        CHECK_EQ(s2, OCG_LOAD_ERR_SCHEMA_VERSION, "internal entry status");
+        CHECK_TRUE(load_error.find("re-record") != std::string::npos,
+                   "load_error mentions 're-record' (loud rejection)");
+        CHECK_TRUE(load_error.find("schema version 1") != std::string::npos ||
+                   load_error.find("schema version") != std::string::npos,
+                   "load_error mentions schema version");
+        if (d) delete d;  // defensive; deserialize_duel should not allocate on error
+    }
+    return true;
+}
+
+// Synthetic round-trip of every Tier 3 ProcessorUnit variant. Push
+// one of each into core.units, save, load, verify each variant
+// materialized correctly. Replaces the case-by-case "drive engine
+// into specific Select* state" approach (which would require a much
+// richer scripted-card fixture for each variant) with a synthetic
+// fixture that covers the proto/save/load wiring directly.
+bool test_chunk9b_tier3_synthetic_round_trip() {
+    OCG_Duel orig = make_chunk5a_duel(0x9B05);
+    CHECK_TRUE(orig != nullptr, "create orig");
+    populate_simple_deck(orig);
+
+    auto* d_orig = static_cast<duel*>(orig);
+    auto& units = d_orig->game_field->core.units;
+    units.clear();
+
+    // Pick a card to embed in SelectEffectYesNo's pcard field.
+    card* pcard = d_orig->game_field->player[0].list_main[0];
+    const uint32_t pcard_id = pcard->cardid;
+
+    // Push one of each Tier 3 variant. Specific field values chosen to
+    // be distinctive (avoid 0/1 collisions) so a copy-paste bug in
+    // save or load surfaces immediately. See processor_unit.h for
+    // each constructor signature.
+    Processors::emplace_variant<Processors::SelectBattleCmd>(units,
+        uint16_t{1}, uint8_t{0});
+    Processors::emplace_variant<Processors::SelectChain>(units,
+        uint16_t{1}, uint8_t{1}, uint8_t{3}, true);
+    Processors::emplace_variant<Processors::SelectCard>(units,
+        uint16_t{1}, uint8_t{0}, true, uint8_t{1}, uint8_t{2});
+    Processors::emplace_variant<Processors::SelectCardCodes>(units,
+        uint16_t{1}, uint8_t{0}, false, uint8_t{1}, uint8_t{1});
+    Processors::emplace_variant<Processors::SelectUnselectCard>(units,
+        uint16_t{1}, uint8_t{1}, true, uint8_t{0}, uint8_t{3}, false);
+    Processors::emplace_variant<Processors::SelectPosition>(units,
+        uint16_t{1}, uint8_t{0}, uint32_t{46986414}, uint8_t{0x05});
+    Processors::emplace_variant<Processors::SelectTributeP>(units,
+        uint16_t{1}, uint8_t{0}, true, uint8_t{1}, uint8_t{2});
+    Processors::emplace_variant<Processors::SelectCounter>(units,
+        uint16_t{1}, uint8_t{0}, uint16_t{0xC0DE}, uint16_t{3},
+        uint8_t{1}, uint8_t{0});
+    Processors::emplace_variant<Processors::SelectSum>(units,
+        uint16_t{1}, uint8_t{0}, int32_t{1500}, int32_t{1}, int32_t{5});
+    Processors::emplace_variant<Processors::SortCard>(units,
+        uint16_t{1}, uint8_t{0}, true);
+    Processors::emplace_variant<Processors::SelectYesNo>(units,
+        uint16_t{1}, uint8_t{0}, uint64_t{0xCAFEBABE});
+    Processors::emplace_variant<Processors::SelectEffectYesNo>(units,
+        uint16_t{1}, uint8_t{0}, uint64_t{0xDEADBEEF}, pcard);
+    Processors::emplace_variant<Processors::SelectOption>(units,
+        uint16_t{1}, uint8_t{0});
+    Processors::emplace_variant<Processors::AnnounceRace>(units,
+        uint16_t{1}, uint8_t{0}, uint8_t{2}, uint64_t{0xFFEE});
+    Processors::emplace_variant<Processors::AnnounceAttribute>(units,
+        uint16_t{1}, uint8_t{0}, uint8_t{1}, uint32_t{0x40});
+    Processors::emplace_variant<Processors::AnnounceCard>(units,
+        uint16_t{1}, uint8_t{0});
+    Processors::emplace_variant<Processors::AnnounceNumber>(units,
+        uint16_t{1}, uint8_t{0});
+    Processors::emplace_variant<Processors::RockPaperScissors>(units,
+        uint16_t{1}, true);
+
+    const size_t expected_units = units.size();
+
+    void* blob = nullptr;
+    uint32_t size = 0;
+    CHECK_EQ(OCG_DuelSaveState(orig, &blob, &size), OCG_SAVE_OK,
+             "save with all Tier 3 units");
+
+    OCG_DuelOptions opts = make_chunk5a_load_options();
+    OCG_Duel loaded = nullptr;
+    CHECK_EQ(OCG_DuelLoadState(blob, size, &opts, &loaded), OCG_LOAD_OK,
+             "load");
+
+    auto* d_loaded = static_cast<duel*>(loaded);
+    auto& units_loaded = d_loaded->game_field->core.units;
+    CHECK_EQ(units_loaded.size(), expected_units, "unit count round-trips");
+
+    auto it = units_loaded.begin();
+    auto pop = [&]() { processor_unit& u = *it; ++it; return &u; };
+
+    if (auto* p = Processors::get_opt_variant<Processors::SelectBattleCmd>(*pop())) {
+        CHECK_EQ(p->step, 1, "SelectBattleCmd.step");
+        CHECK_EQ(p->playerid, 0, "SelectBattleCmd.playerid");
+    } else { CHECK_TRUE(false, "SelectBattleCmd"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::SelectChain>(*pop())) {
+        CHECK_EQ(p->step, 1, "SelectChain.step");
+        CHECK_EQ(p->playerid, 1, "SelectChain.playerid");
+        CHECK_EQ(p->spe_count, 3, "SelectChain.spe_count");
+        CHECK_TRUE(p->forced, "SelectChain.forced");
+    } else { CHECK_TRUE(false, "SelectChain"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::SelectCard>(*pop())) {
+        CHECK_EQ(p->step, 1, "SelectCard.step");
+        CHECK_TRUE(p->cancelable, "SelectCard.cancelable");
+        CHECK_EQ(p->min, 1, "SelectCard.min");
+        CHECK_EQ(p->max, 2, "SelectCard.max");
+    } else { CHECK_TRUE(false, "SelectCard"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::SelectCardCodes>(*pop())) {
+        CHECK_EQ(p->step, 1, "SelectCardCodes.step");
+        CHECK_TRUE(!p->cancelable, "SelectCardCodes.cancelable");
+        CHECK_EQ(p->max, 1, "SelectCardCodes.max");
+    } else { CHECK_TRUE(false, "SelectCardCodes"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::SelectUnselectCard>(*pop())) {
+        CHECK_EQ(p->playerid, 1, "SelectUnselectCard.playerid");
+        CHECK_TRUE(p->cancelable, "SelectUnselectCard.cancelable");
+        CHECK_EQ(p->max, 3, "SelectUnselectCard.max");
+        CHECK_TRUE(!p->finishable, "SelectUnselectCard.finishable");
+    } else { CHECK_TRUE(false, "SelectUnselectCard"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::SelectPosition>(*pop())) {
+        CHECK_EQ(p->code, 46986414u, "SelectPosition.code");
+        CHECK_EQ(p->positions, 0x05u, "SelectPosition.positions");
+    } else { CHECK_TRUE(false, "SelectPosition"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::SelectTributeP>(*pop())) {
+        CHECK_TRUE(p->cancelable, "SelectTributeP.cancelable");
+        CHECK_EQ(p->max, 2, "SelectTributeP.max");
+    } else { CHECK_TRUE(false, "SelectTributeP"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::SelectCounter>(*pop())) {
+        CHECK_EQ(p->countertype, 0xC0DEu, "SelectCounter.countertype");
+        CHECK_EQ(p->count, 3u,            "SelectCounter.count");
+        CHECK_EQ(p->self, 1u,             "SelectCounter.self");
+        CHECK_EQ(p->oppo, 0u,             "SelectCounter.oppo");
+    } else { CHECK_TRUE(false, "SelectCounter"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::SelectSum>(*pop())) {
+        CHECK_EQ(p->acc, 1500, "SelectSum.acc");
+        CHECK_EQ(p->min, 1,    "SelectSum.min");
+        CHECK_EQ(p->max, 5,    "SelectSum.max");
+    } else { CHECK_TRUE(false, "SelectSum"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::SortCard>(*pop())) {
+        CHECK_TRUE(p->is_chain, "SortCard.is_chain");
+    } else { CHECK_TRUE(false, "SortCard"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::SelectYesNo>(*pop())) {
+        CHECK_EQ(p->description, 0xCAFEBABEull, "SelectYesNo.description");
+    } else { CHECK_TRUE(false, "SelectYesNo"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::SelectEffectYesNo>(*pop())) {
+        CHECK_EQ(p->description, 0xDEADBEEFull, "SelectEffectYesNo.description");
+        CHECK_TRUE(p->pcard != nullptr,
+                   "SelectEffectYesNo.pcard non-null after load");
+        CHECK_EQ(p->pcard->cardid, pcard_id,
+                 "SelectEffectYesNo.pcard cardid round-trips");
+    } else { CHECK_TRUE(false, "SelectEffectYesNo"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::SelectOption>(*pop())) {
+        CHECK_EQ(p->step, 1, "SelectOption.step");
+    } else { CHECK_TRUE(false, "SelectOption"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::AnnounceRace>(*pop())) {
+        CHECK_EQ(p->count, 2u,             "AnnounceRace.count");
+        CHECK_EQ(p->available, 0xFFEEull,  "AnnounceRace.available");
+    } else { CHECK_TRUE(false, "AnnounceRace"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::AnnounceAttribute>(*pop())) {
+        CHECK_EQ(p->count, 1u,           "AnnounceAttribute.count");
+        CHECK_EQ(p->available, 0x40u,    "AnnounceAttribute.available");
+    } else { CHECK_TRUE(false, "AnnounceAttribute"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::AnnounceCard>(*pop())) {
+        CHECK_EQ(p->step, 1, "AnnounceCard.step");
+    } else { CHECK_TRUE(false, "AnnounceCard"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::AnnounceNumber>(*pop())) {
+        CHECK_EQ(p->step, 1, "AnnounceNumber.step");
+    } else { CHECK_TRUE(false, "AnnounceNumber"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::RockPaperScissors>(*pop())) {
+        CHECK_TRUE(p->repeat, "RPS.repeat");
+    } else { CHECK_TRUE(false, "RockPaperScissors"); }
+
+    OCG_FreeSaveBuffer(blob);
+    OCG_DestroyDuel(orig);
+    OCG_DestroyDuel(loaded);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // Free-buffer is safe on null
 // ---------------------------------------------------------------------------
 
@@ -1842,6 +2412,20 @@ int main() {
         {"chunk5b_dueltaining_msg_stream", &test_chunk5b_dueltaining_msg_stream},
         {"chunk5b_branded_msg_stream",     &test_chunk5b_branded_msg_stream},
         {"chunk5b_hydor_msg_stream",       &test_chunk5b_hydor_msg_stream},
+        // Chunk 9b — smoke-test abort regression suite (schema v2,
+        // field.processor scratch, Tier 3 ProcessorUnit variants).
+        {"chunk9b_save_load_step_no_msg_retry",
+         &test_chunk9b_save_load_step_no_msg_retry},
+        {"chunk9b_processor_scratch_semantic_round_trip",
+         &test_chunk9b_processor_scratch_semantic_round_trip},
+        {"chunk9b_synthetic_scratch_round_trip",
+         &test_chunk9b_synthetic_scratch_round_trip},
+        {"chunk9b_select_chains_freed_effect_dropped",
+         &test_chunk9b_select_chains_freed_effect_dropped},
+        {"chunk9b_v1_blob_rejected_loud",
+         &test_chunk9b_v1_blob_rejected_loud},
+        {"chunk9b_tier3_synthetic_round_trip",
+         &test_chunk9b_tier3_synthetic_round_trip},
         // Chunk 4 perf scaffold (informational; not gated)
         {"perf_scaffold_vanilla", &test_perf_scaffold_vanilla},
     };
