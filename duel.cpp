@@ -85,6 +85,40 @@ void duel::delete_group(group* pgroup) {
 	delete pgroup;
 }
 void duel::delete_effect(effect* peffect) {
+	// B1 fix (Option B): null stale `effect*` references that point at this
+	// freed effect. `card_state::reason_effect`, `chain::triggering_effect`,
+	// and `chain::disable_reason` are plain pointer fields with no lifecycle
+	// management; the original delete_effect freed `peffect` and erased it
+	// from `effects` but left every dangling reference intact, leading to a
+	// use-after-free at the next save (write_card_state passes the dangling
+	// pointer to he.assign, then write_effect_record dereferences it).
+	//
+	// Scope: sweeps card snapshots (current/previous/temp) on every card and
+	// the active `current_chain`. Other chain_list members of `processor`
+	// (tpchain / ntpchain / select_chains / ignition_priority_chains / the
+	// continuous_chain family / desrep_chain / new_*chain) are NOT swept;
+	// none are populated in current Tier-1/Tier-2 fixtures, and adding them
+	// would widen the patch substantially. Revisit once those paths are wired
+	// into the save corpus (chunk 4-5 + Tier 3).
+	auto clear_card_state = [peffect](card_state& cs) {
+		if (cs.reason_effect == peffect)
+			cs.reason_effect = nullptr;
+	};
+	for (card* pcard : cards) {
+		clear_card_state(pcard->current);
+		clear_card_state(pcard->previous);
+		clear_card_state(pcard->temp);
+	}
+	if (game_field) {
+		for (auto& link : game_field->core.current_chain) {
+			if (link.triggering_effect == peffect)
+				link.triggering_effect = nullptr;
+			if (link.disable_reason == peffect)
+				link.disable_reason = nullptr;
+			// chain::triggering_state is itself a card_state copy.
+			clear_card_state(link.triggering_state);
+		}
+	}
 	lua->unregister_effect(peffect);
 	effects.erase(peffect);
 	delete peffect;
