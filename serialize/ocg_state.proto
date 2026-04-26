@@ -585,6 +585,16 @@ message ProcessorUnit {
         ProcSpSummon           sp_summon              = 149;
         ProcSpSummonStep       sp_summon_step         = 150;
         ProcChangePos          change_pos             = 151;
+        // ── Tier 6 (chunk 9e): Draw / Damage / DamageStep / Equip cluster ──
+        ProcDraw               draw                   = 152;
+        ProcDamage             damage                 = 153;
+        ProcRecover            recover                = 154;
+        ProcDamageStep         damage_step            = 155;
+        ProcEquip              equip                  = 156;
+        ProcPayLPCost          pay_lp_cost            = 157;
+        ProcRemoveCounter      remove_counter         = 158;
+        ProcTossCoin           toss_coin              = 159;
+        ProcTossDice           toss_dice              = 160;
     }
 }
 
@@ -1155,4 +1165,105 @@ message ProcChangePos {
     uint32 reason_effect_handle = 5; // → EffectRecord; 0 = none/freed
     uint32 targets_group_handle = 6; // → GroupRecord; 0 = nullptr
     repeated uint32 to_grave_card_handles = 7; // card_set to_grave_set
+}
+
+// ---------------------------------------------------------------------------
+// Tier 6 (chunk 9e): Draw / Damage / DamageStep / Equip cluster messages.
+// These types block saves during card draws, LP changes, battle-damage steps,
+// equip-spell attachment, counter removal, and coin/dice tosses.
+// ---------------------------------------------------------------------------
+
+// Draw: card draw sequence.
+// drawn_card_handles serializes card_set drawn_set (accumulated drawn cards).
+message ProcDraw {
+    uint32 step = 1;
+    uint32 count = 2;                // uint16 in C++
+    uint32 reason_player = 3;        // uint8 in C++
+    uint32 playerid = 4;             // uint8 in C++
+    uint32 reason = 5;               // uint32 in C++
+    uint32 reason_effect_handle = 6; // → EffectRecord; 0 = none/freed
+    repeated uint32 drawn_card_handles = 7; // card_set drawn_set
+}
+
+// Damage: LP damage processing.
+message ProcDamage {
+    uint32 step = 1;
+    uint32 reason_player = 2;        // uint8 in C++
+    uint32 playerid = 3;             // uint8 in C++
+    bool is_step = 4;
+    bool is_reflected = 5;
+    uint32 amount = 6;               // uint32 in C++
+    uint32 reason = 7;               // uint32 in C++
+    uint32 reason_card_handle = 8;   // → CardRecord; 0 = nullptr
+    uint32 reason_effect_handle = 9; // → EffectRecord; 0 = none/freed
+}
+
+// Recover: LP recovery processing.
+message ProcRecover {
+    uint32 step = 1;
+    uint32 reason_player = 2;        // uint8 in C++
+    uint32 playerid = 3;             // uint8 in C++
+    bool is_step = 4;
+    uint32 amount = 5;               // uint32 in C++
+    uint32 reason = 6;               // uint32 in C++
+    uint32 reason_effect_handle = 7; // → EffectRecord; 0 = none/freed
+}
+
+// DamageStep: per-attack damage step (battle damage calculation).
+// cards_destroyed_by_battle_group_handle → GroupRecord (group* may be nullptr).
+message ProcDamageStep {
+    uint32 step = 1;
+    uint32 backup_phase = 2;         // uint16 in C++
+    bool new_attack = 3;
+    uint32 attacker_card_handle = 4;         // → CardRecord; 0 = nullptr
+    uint32 attack_target_card_handle = 5;    // → CardRecord; 0 = nullptr
+    uint32 cards_destroyed_by_battle_group_handle = 6; // → GroupRecord; 0 = nullptr
+}
+
+// Equip: equip-spell attachment to a monster.
+message ProcEquip {
+    uint32 step = 1;
+    uint32 equip_player = 2;         // uint8 in C++
+    bool is_step = 3;
+    bool faceup = 4;
+    uint32 equip_card_handle = 5;    // → CardRecord; 0 = nullptr
+    uint32 target_card_handle = 6;   // → CardRecord; 0 = nullptr
+}
+
+// PayLPCost: LP cost payment (no effect pointer — just player + amount).
+message ProcPayLPCost {
+    uint32 step = 1;
+    uint32 playerid = 2;             // uint8 in C++
+    uint32 cost = 3;                 // uint32 in C++
+}
+
+// RemoveCounter: counter removal from a card.
+message ProcRemoveCounter {
+    uint32 step = 1;
+    uint32 rplayer = 2;              // uint8 in C++
+    uint32 self = 3;                 // uint8 in C++
+    uint32 oppo = 4;                 // uint8 in C++
+    uint32 countertype = 5;          // uint16 in C++
+    uint32 count = 6;                // uint16 in C++
+    uint32 reason = 7;               // uint32 in C++
+    uint32 pcard_handle = 8;         // → CardRecord; 0 = nullptr
+}
+
+// TossCoin: coin toss (e.g. Graceful Charity / Skull Dice variants).
+message ProcTossCoin {
+    uint32 step = 1;
+    uint32 playerid = 2;             // uint8 in C++
+    uint32 reason_player = 3;        // uint8 in C++
+    uint32 count = 4;                // uint8 in C++
+    uint32 reason_effect_handle = 5; // → EffectRecord; 0 = none/freed
+}
+
+// TossDice: dice roll.
+message ProcTossDice {
+    uint32 step = 1;
+    uint32 playerid = 2;             // uint8 in C++
+    uint32 reason_player = 3;        // uint8 in C++
+    uint32 count1 = 4;               // uint8 in C++ (player 0 dice count)
+    uint32 count2 = 5;               // uint8 in C++ (player 1 dice count)
+    uint32 reason_effect_handle = 6; // → EffectRecord; 0 = none/freed
 }

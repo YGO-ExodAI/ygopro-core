@@ -833,6 +833,99 @@ OCG_SaveStatus write_processor_unit_inner(
                 for (card* c : v.to_grave_set)
                     m->add_to_grave_card_handles(hc_assign_safe(hc, c));
                 return OCG_SAVE_OK;
+            // ── Tier 6 (chunk 9e): Draw / Damage / DamageStep / Equip cluster ──
+            } else if constexpr (std::is_same_v<T, Processors::Draw>) {
+                auto* m = dst_unit->mutable_draw();
+                m->set_step(v.step);
+                m->set_count(v.count);
+                m->set_reason_player(v.reason_player);
+                m->set_playerid(v.playerid);
+                m->set_reason(v.reason);
+                m->set_reason_effect_handle(
+                    assign_effect_if_live(he, v.reason_effect, live_effects));
+                for (card* c : v.drawn_set)
+                    m->add_drawn_card_handles(hc_assign_safe(hc, c));
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::Damage>) {
+                auto* m = dst_unit->mutable_damage();
+                m->set_step(v.step);
+                m->set_reason_player(v.reason_player);
+                m->set_playerid(v.playerid);
+                m->set_is_step(v.is_step);
+                m->set_is_reflected(v.is_reflected);
+                m->set_amount(v.amount);
+                m->set_reason(v.reason);
+                m->set_reason_card_handle(hc_assign_safe(hc, v.reason_card));
+                m->set_reason_effect_handle(
+                    assign_effect_if_live(he, v.reason_effect, live_effects));
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::Recover>) {
+                auto* m = dst_unit->mutable_recover();
+                m->set_step(v.step);
+                m->set_reason_player(v.reason_player);
+                m->set_playerid(v.playerid);
+                m->set_is_step(v.is_step);
+                m->set_amount(v.amount);
+                m->set_reason(v.reason);
+                m->set_reason_effect_handle(
+                    assign_effect_if_live(he, v.reason_effect, live_effects));
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::DamageStep>) {
+                auto* m = dst_unit->mutable_damage_step();
+                m->set_step(v.step);
+                m->set_backup_phase(v.backup_phase);
+                m->set_new_attack(v.new_attack);
+                m->set_attacker_card_handle(hc_assign_safe(hc, v.attacker));
+                m->set_attack_target_card_handle(
+                    hc_assign_safe(hc, v.attack_target));
+                m->set_cards_destroyed_by_battle_group_handle(
+                    hg.assign(v.cards_destroyed_by_battle));
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::Equip>) {
+                auto* m = dst_unit->mutable_equip();
+                m->set_step(v.step);
+                m->set_equip_player(v.equip_player);
+                m->set_is_step(v.is_step);
+                m->set_faceup(v.faceup);
+                m->set_equip_card_handle(hc_assign_safe(hc, v.equip_card));
+                m->set_target_card_handle(hc_assign_safe(hc, v.target));
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::PayLPCost>) {
+                auto* m = dst_unit->mutable_pay_lp_cost();
+                m->set_step(v.step);
+                m->set_playerid(v.playerid);
+                m->set_cost(v.cost);
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::RemoveCounter>) {
+                auto* m = dst_unit->mutable_remove_counter();
+                m->set_step(v.step);
+                m->set_rplayer(v.rplayer);
+                m->set_self(v.self);
+                m->set_oppo(v.oppo);
+                m->set_countertype(v.countertype);
+                m->set_count(v.count);
+                m->set_reason(v.reason);
+                m->set_pcard_handle(hc_assign_safe(hc, v.pcard));
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::TossCoin>) {
+                auto* m = dst_unit->mutable_toss_coin();
+                m->set_step(v.step);
+                m->set_playerid(v.playerid);
+                m->set_reason_player(v.reason_player);
+                m->set_count(v.count);
+                m->set_reason_effect_handle(
+                    assign_effect_if_live(he, v.reason_effect, live_effects));
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::TossDice>) {
+                auto* m = dst_unit->mutable_toss_dice();
+                m->set_step(v.step);
+                m->set_playerid(v.playerid);
+                m->set_reason_player(v.reason_player);
+                m->set_count1(v.count1);
+                m->set_count2(v.count2);
+                m->set_reason_effect_handle(
+                    assign_effect_if_live(he, v.reason_effect, live_effects));
+                return OCG_SAVE_OK;
             } else {
                 if (refuse_reason) {
                     char buf[240];

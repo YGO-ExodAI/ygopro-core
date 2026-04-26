@@ -2535,6 +2535,195 @@ bool test_chunk9d_tier5_synthetic_round_trip() {
 }
 
 // ---------------------------------------------------------------------------
+// Tier 6 (chunk 9e) — synthetic round-trip for Draw / Damage / DamageStep /
+// Equip / PayLPCost / RemoveCounter / TossCoin / TossDice / Recover (9 types).
+// Mirrors test_chunk9d_tier5_synthetic_round_trip.
+// ---------------------------------------------------------------------------
+
+bool test_chunk9e_tier6_synthetic_round_trip() {
+    OCG_Duel orig = make_chunk5a_duel(0x9E06);
+    CHECK_TRUE(orig != nullptr, "create orig");
+    populate_simple_deck(orig);
+
+    auto* d_orig = static_cast<duel*>(orig);
+    auto& units = d_orig->game_field->core.units;
+    units.clear();
+
+    card* pcard0 = d_orig->game_field->player[0].list_main[0];
+    card* pcard1 = d_orig->game_field->player[0].list_main[1];
+    const uint32_t pcard0_id = pcard0->cardid;
+    const uint32_t pcard1_id = pcard1->cardid;
+
+    // Draw: step=1, count=2, reason_player=0, playerid=0, reason=0x01,
+    //       reff=nullptr, drawn_set={pcard0}.
+    Processors::emplace_variant<Processors::Draw>(
+        units, uint16_t{1}, nullptr, uint32_t{0x01},
+        uint8_t{0}, uint8_t{0}, uint16_t{2});
+    if (auto* p = Processors::get_opt_variant<Processors::Draw>(
+            units.back())) {
+        p->drawn_set.insert(pcard0);
+    }
+
+    // Damage: step=2, reff=nullptr, reason=0x02, reason_player=1,
+    //         reason_card=pcard1, playerid=0, amount=800, is_step=true.
+    Processors::emplace_variant<Processors::Damage>(
+        units, uint16_t{2}, nullptr, uint32_t{0x02},
+        uint8_t{1}, pcard1, uint8_t{0}, uint32_t{800}, true);
+    if (auto* p = Processors::get_opt_variant<Processors::Damage>(
+            units.back())) {
+        p->is_reflected = true;
+    }
+
+    // Recover: step=3, reff=nullptr, reason=0x04, reason_player=0,
+    //          playerid=1, amount=500, is_step=false.
+    Processors::emplace_variant<Processors::Recover>(
+        units, uint16_t{3}, nullptr, uint32_t{0x04},
+        uint8_t{0}, uint8_t{1}, uint32_t{500}, false);
+
+    // DamageStep: step=4, attacker=pcard0, attack_target=pcard1, new_attack=true.
+    Processors::emplace_variant<Processors::DamageStep>(
+        units, uint16_t{4}, pcard0, pcard1, true);
+    if (auto* p = Processors::get_opt_variant<Processors::DamageStep>(
+            units.back())) {
+        p->backup_phase = 0x04;
+    }
+
+    // Equip: step=5, equip_player=0, equip_card=pcard0, target=pcard1,
+    //        faceup=true, is_step=false.
+    Processors::emplace_variant<Processors::Equip>(
+        units, uint16_t{5}, uint8_t{0}, pcard0, pcard1, true, false);
+
+    // PayLPCost: step=6, playerid=1, cost=1000.
+    Processors::emplace_variant<Processors::PayLPCost>(
+        units, uint16_t{6}, uint8_t{1}, uint32_t{1000});
+
+    // RemoveCounter: step=7, reason=0x08, pcard=pcard0, rplayer=0,
+    //               self=1, oppo=0, countertype=0x11, count=2.
+    Processors::emplace_variant<Processors::RemoveCounter>(
+        units, uint16_t{7}, uint32_t{0x08}, pcard0,
+        uint8_t{0}, uint8_t{1}, uint8_t{0},
+        uint16_t{0x11}, uint16_t{2});
+
+    // TossCoin: step=8, reff=nullptr, reason_player=0, playerid=0, count=3.
+    Processors::emplace_variant<Processors::TossCoin>(
+        units, uint16_t{8}, nullptr, uint8_t{0}, uint8_t{0}, uint8_t{3});
+
+    // TossDice: step=9, reff=nullptr, reason_player=1, playerid=0,
+    //           count1=2, count2=1.
+    Processors::emplace_variant<Processors::TossDice>(
+        units, uint16_t{9}, nullptr, uint8_t{1}, uint8_t{0},
+        uint8_t{2}, uint8_t{1});
+
+    const size_t expected_units = units.size();
+
+    void* blob = nullptr;
+    uint32_t size = 0;
+    CHECK_EQ(OCG_DuelSaveState(orig, &blob, &size), OCG_SAVE_OK,
+             "save with all Tier 6 units");
+
+    OCG_DuelOptions opts = make_chunk5a_load_options();
+    OCG_Duel loaded = nullptr;
+    CHECK_EQ(OCG_DuelLoadState(blob, size, &opts, &loaded), OCG_LOAD_OK,
+             "load Tier 6 blob");
+
+    auto* d_loaded = static_cast<duel*>(loaded);
+    auto& ul = d_loaded->game_field->core.units;
+    CHECK_EQ(ul.size(), expected_units, "unit count round-trips");
+
+    auto it = ul.begin();
+    auto pop = [&]() -> processor_unit& { processor_unit& u = *it; ++it; return u; };
+
+    if (auto* p = Processors::get_opt_variant<Processors::Draw>(pop())) {
+        CHECK_EQ(p->step, 1,            "Draw.step");
+        CHECK_EQ(p->count, 2,           "Draw.count");
+        CHECK_EQ(p->reason_player, 0,   "Draw.reason_player");
+        CHECK_EQ(p->playerid, 0,        "Draw.playerid");
+        CHECK_EQ(p->reason, 0x01u,      "Draw.reason");
+        CHECK_EQ(p->drawn_set.size(), size_t{1}, "Draw.drawn_set size");
+    } else { CHECK_TRUE(false, "Draw variant"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::Damage>(pop())) {
+        CHECK_EQ(p->step, 2,            "Damage.step");
+        CHECK_EQ(p->reason_player, 1,   "Damage.reason_player");
+        CHECK_EQ(p->playerid, 0,        "Damage.playerid");
+        CHECK_TRUE(p->is_step,          "Damage.is_step");
+        CHECK_TRUE(p->is_reflected,     "Damage.is_reflected");
+        CHECK_EQ(p->amount, 800u,       "Damage.amount");
+        CHECK_EQ(p->reason, 0x02u,      "Damage.reason");
+        CHECK_TRUE(p->reason_card != nullptr, "Damage.reason_card non-null");
+        CHECK_EQ(p->reason_card->cardid, pcard1_id, "Damage.reason_card cardid");
+    } else { CHECK_TRUE(false, "Damage variant"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::Recover>(pop())) {
+        CHECK_EQ(p->step, 3,            "Recover.step");
+        CHECK_EQ(p->reason_player, 0,   "Recover.reason_player");
+        CHECK_EQ(p->playerid, 1,        "Recover.playerid");
+        CHECK_TRUE(!p->is_step,         "Recover.is_step");
+        CHECK_EQ(p->amount, 500u,       "Recover.amount");
+        CHECK_EQ(p->reason, 0x04u,      "Recover.reason");
+    } else { CHECK_TRUE(false, "Recover variant"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::DamageStep>(pop())) {
+        CHECK_EQ(p->step, 4,            "DamageStep.step");
+        CHECK_EQ(p->backup_phase, 4,    "DamageStep.backup_phase");
+        CHECK_TRUE(p->new_attack,       "DamageStep.new_attack");
+        CHECK_TRUE(p->attacker != nullptr, "DamageStep.attacker non-null");
+        CHECK_EQ(p->attacker->cardid, pcard0_id, "DamageStep.attacker cardid");
+        CHECK_TRUE(p->attack_target != nullptr, "DamageStep.attack_target non-null");
+        CHECK_EQ(p->attack_target->cardid, pcard1_id, "DamageStep.attack_target cardid");
+    } else { CHECK_TRUE(false, "DamageStep variant"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::Equip>(pop())) {
+        CHECK_EQ(p->step, 5,            "Equip.step");
+        CHECK_EQ(p->equip_player, 0,    "Equip.equip_player");
+        CHECK_TRUE(!p->is_step,         "Equip.is_step");
+        CHECK_TRUE(p->faceup,           "Equip.faceup");
+        CHECK_TRUE(p->equip_card != nullptr, "Equip.equip_card non-null");
+        CHECK_EQ(p->equip_card->cardid, pcard0_id, "Equip.equip_card cardid");
+        CHECK_TRUE(p->target != nullptr, "Equip.target non-null");
+        CHECK_EQ(p->target->cardid, pcard1_id, "Equip.target cardid");
+    } else { CHECK_TRUE(false, "Equip variant"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::PayLPCost>(pop())) {
+        CHECK_EQ(p->step, 6,            "PayLPCost.step");
+        CHECK_EQ(p->playerid, 1,        "PayLPCost.playerid");
+        CHECK_EQ(p->cost, 1000u,        "PayLPCost.cost");
+    } else { CHECK_TRUE(false, "PayLPCost variant"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::RemoveCounter>(pop())) {
+        CHECK_EQ(p->step, 7,            "RemoveCounter.step");
+        CHECK_EQ(p->rplayer, 0,         "RemoveCounter.rplayer");
+        CHECK_EQ(p->self, 1,            "RemoveCounter.self");
+        CHECK_EQ(p->oppo, 0,            "RemoveCounter.oppo");
+        CHECK_EQ(p->countertype, 0x11,  "RemoveCounter.countertype");
+        CHECK_EQ(p->count, 2,           "RemoveCounter.count");
+        CHECK_EQ(p->reason, 0x08u,      "RemoveCounter.reason");
+        CHECK_TRUE(p->pcard != nullptr, "RemoveCounter.pcard non-null");
+        CHECK_EQ(p->pcard->cardid, pcard0_id, "RemoveCounter.pcard cardid");
+    } else { CHECK_TRUE(false, "RemoveCounter variant"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::TossCoin>(pop())) {
+        CHECK_EQ(p->step, 8,            "TossCoin.step");
+        CHECK_EQ(p->playerid, 0,        "TossCoin.playerid");
+        CHECK_EQ(p->reason_player, 0,   "TossCoin.reason_player");
+        CHECK_EQ(p->count, 3,           "TossCoin.count");
+    } else { CHECK_TRUE(false, "TossCoin variant"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::TossDice>(pop())) {
+        CHECK_EQ(p->step, 9,            "TossDice.step");
+        CHECK_EQ(p->playerid, 0,        "TossDice.playerid");
+        CHECK_EQ(p->reason_player, 1,   "TossDice.reason_player");
+        CHECK_EQ(p->count1, 2,          "TossDice.count1");
+        CHECK_EQ(p->count2, 1,          "TossDice.count2");
+    } else { CHECK_TRUE(false, "TossDice variant"); }
+
+    OCG_FreeSaveBuffer(blob);
+    OCG_DestroyDuel(orig);
+    OCG_DestroyDuel(loaded);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // Free-buffer is safe on null
 // ---------------------------------------------------------------------------
 
@@ -2625,6 +2814,9 @@ int main() {
         // Chunk 9d Tier 5 — SpellSet / SummonRule / MonsterSet clusters
         {"chunk9d_tier5_synthetic_round_trip",
          &test_chunk9d_tier5_synthetic_round_trip},
+        // Chunk 9e Tier 6 — Draw / Damage / DamageStep / Equip cluster
+        {"chunk9e_tier6_synthetic_round_trip",
+         &test_chunk9e_tier6_synthetic_round_trip},
         // Chunk 4 perf scaffold (informational; not gated)
         {"perf_scaffold_vanilla", &test_perf_scaffold_vanilla},
     };

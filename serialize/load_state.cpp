@@ -866,6 +866,122 @@ bool load_processor_unit_into(
             }
             return true;
         }
+        // ── Tier 6 (chunk 9e): Draw / Damage / DamageStep / Equip cluster ──
+        case ocg::state::ProcessorUnit::kDraw: {
+            const auto& m = src_unit.draw();
+            effect* reff = he.lookup(m.reason_effect_handle());
+            Processors::emplace_variant<Processors::Draw>(
+                dst, static_cast<uint16_t>(m.step()),
+                reff, m.reason(),
+                static_cast<uint8_t>(m.reason_player()),
+                static_cast<uint8_t>(m.playerid()),
+                static_cast<uint16_t>(m.count()));
+            if (auto* p = Processors::get_opt_variant<Processors::Draw>(
+                    dst.back())) {
+                for (const uint32_t h : m.drawn_card_handles()) {
+                    if (card* c = hc.lookup(h)) p->drawn_set.insert(c);
+                }
+            }
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kDamage: {
+            const auto& m = src_unit.damage();
+            card* reason_card = hc.lookup(m.reason_card_handle());
+            effect* reff = he.lookup(m.reason_effect_handle());
+            Processors::emplace_variant<Processors::Damage>(
+                dst, static_cast<uint16_t>(m.step()),
+                reff, m.reason(),
+                static_cast<uint8_t>(m.reason_player()),
+                reason_card,
+                static_cast<uint8_t>(m.playerid()),
+                m.amount(), m.is_step());
+            if (auto* p = Processors::get_opt_variant<Processors::Damage>(
+                    dst.back())) {
+                p->is_reflected = m.is_reflected();
+            }
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kRecover: {
+            const auto& m = src_unit.recover();
+            effect* reff = he.lookup(m.reason_effect_handle());
+            Processors::emplace_variant<Processors::Recover>(
+                dst, static_cast<uint16_t>(m.step()),
+                reff, m.reason(),
+                static_cast<uint8_t>(m.reason_player()),
+                static_cast<uint8_t>(m.playerid()),
+                m.amount(), m.is_step());
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kDamageStep: {
+            const auto& m = src_unit.damage_step();
+            card* attacker = hc.lookup(m.attacker_card_handle());
+            card* attack_target = hc.lookup(m.attack_target_card_handle());
+            Processors::emplace_variant<Processors::DamageStep>(
+                dst, static_cast<uint16_t>(m.step()),
+                attacker, attack_target, m.new_attack());
+            if (auto* p = Processors::get_opt_variant<Processors::DamageStep>(
+                    dst.back())) {
+                p->backup_phase = static_cast<uint16_t>(m.backup_phase());
+                p->cards_destroyed_by_battle =
+                    hg.lookup(m.cards_destroyed_by_battle_group_handle());
+            }
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kEquip: {
+            const auto& m = src_unit.equip();
+            card* equip_card = hc.lookup(m.equip_card_handle());
+            card* target = hc.lookup(m.target_card_handle());
+            Processors::emplace_variant<Processors::Equip>(
+                dst, static_cast<uint16_t>(m.step()),
+                static_cast<uint8_t>(m.equip_player()),
+                equip_card, target,
+                m.faceup(), m.is_step());
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kPayLpCost: {
+            const auto& m = src_unit.pay_lp_cost();
+            Processors::emplace_variant<Processors::PayLPCost>(
+                dst, static_cast<uint16_t>(m.step()),
+                static_cast<uint8_t>(m.playerid()),
+                m.cost());
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kRemoveCounter: {
+            const auto& m = src_unit.remove_counter();
+            card* pcard = hc.lookup(m.pcard_handle());
+            Processors::emplace_variant<Processors::RemoveCounter>(
+                dst, static_cast<uint16_t>(m.step()),
+                m.reason(), pcard,
+                static_cast<uint8_t>(m.rplayer()),
+                static_cast<uint8_t>(m.self()),
+                static_cast<uint8_t>(m.oppo()),
+                static_cast<uint16_t>(m.countertype()),
+                static_cast<uint16_t>(m.count()));
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kTossCoin: {
+            const auto& m = src_unit.toss_coin();
+            effect* reff = he.lookup(m.reason_effect_handle());
+            Processors::emplace_variant<Processors::TossCoin>(
+                dst, static_cast<uint16_t>(m.step()),
+                reff,
+                static_cast<uint8_t>(m.reason_player()),
+                static_cast<uint8_t>(m.playerid()),
+                static_cast<uint8_t>(m.count()));
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kTossDice: {
+            const auto& m = src_unit.toss_dice();
+            effect* reff = he.lookup(m.reason_effect_handle());
+            Processors::emplace_variant<Processors::TossDice>(
+                dst, static_cast<uint16_t>(m.step()),
+                reff,
+                static_cast<uint8_t>(m.reason_player()),
+                static_cast<uint8_t>(m.playerid()),
+                static_cast<uint8_t>(m.count1()),
+                static_cast<uint8_t>(m.count2()));
+            return true;
+        }
         case ocg::state::ProcessorUnit::UNIT_NOT_SET:
             if (load_error) {
                 *load_error = "ProcessorUnit in '" +
