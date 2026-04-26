@@ -571,6 +571,20 @@ message ProcessorUnit {
         ProcBattleCommand      battle_command         = 139;
         ProcSelfDestroyUnique  self_destroy_unique    = 140;
         ProcSelectDisField     select_dis_field       = 141;
+        // ── Tier 5 (chunk 9d): SpellSet, SummonRule, MonsterSet clusters.
+        // Unlocks idle-mp1 saves during spell-set/summon-rule/monster-set
+        // framing, and enables select-position / select-place / select-yesno
+        // categories that were previously blocked by these types on the stack.
+        ProcSpellSet           spell_set              = 142;
+        ProcSpellSetGroup      spell_set_group        = 143;
+        ProcSummonRule         summon_rule            = 144;
+        ProcSpSummonRule       sp_summon_rule         = 145;
+        ProcSpSummonRuleGroup  sp_summon_rule_group   = 146;
+        ProcMonsterSet         monster_set            = 147;
+        ProcFlipSummon         flip_summon            = 148;
+        ProcSpSummon           sp_summon              = 149;
+        ProcSpSummonStep       sp_summon_step         = 150;
+        ProcChangePos          change_pos             = 151;
     }
 }
 
@@ -1020,4 +1034,125 @@ message ProcSelectDisField {
     uint32 count = 3;               // uint8 in C++
     uint32 flag = 4;                // uint32 in C++
     bool disable_field = 5;         // always true; carried for self-documentation
+}
+
+// ---------------------------------------------------------------------------
+// Tier 5 (chunk 9d): SpellSet, SummonRule, MonsterSet cluster messages.
+// These types appear on core.units/subunits during spell-setting,
+// normal/tribute/special-summon rule checks, and monster-setting, blocking
+// idle-mp1 and select-* saves in the Yugi/Kaiba starter format.
+// ---------------------------------------------------------------------------
+
+// SpellSet: single spell/trap set from hand to field.
+message ProcSpellSet {
+    uint32 step = 1;
+    uint32 setplayer = 2;           // uint8 in C++
+    uint32 toplayer = 3;            // uint8 in C++
+    uint32 target_card_handle = 4;  // → CardRecord; 0 = nullptr
+    uint32 reason_effect_handle = 5; // → EffectRecord; 0 = none/freed
+}
+
+// SpellSetGroup: simultaneous set of a group of spell/trap cards.
+// set_card_handles serializes the card_set set_cards accumulator.
+message ProcSpellSetGroup {
+    uint32 step = 1;
+    uint32 setplayer = 2;           // uint8 in C++
+    uint32 toplayer = 3;            // uint8 in C++
+    bool confirm = 4;
+    uint32 ptarget_group_handle = 5; // → GroupRecord; 0 = nullptr
+    uint32 reason_effect_handle = 6; // → EffectRecord; 0 = none/freed
+    repeated uint32 set_card_handles = 7; // card_set set_cards (sorted, dup-free)
+}
+
+// SummonRule: normal/tribute-summon rule-check framing.
+// tribute_card_handles serializes card_set tributes (selected tributes so far).
+// summon_cost_effect_handles serializes effect_set summon_cost_effects.
+message ProcSummonRule {
+    uint32 step = 1;
+    uint32 sumplayer = 2;           // uint8 in C++
+    uint32 min_tribute = 3;         // uint8 in C++
+    uint32 max_allowed_tributes = 4; // uint8 in C++
+    bool ignore_count = 5;
+    uint32 zone = 6;                // uint32 in C++
+    uint32 target_card_handle = 7;  // → CardRecord; 0 = nullptr
+    uint32 summon_procedure_effect_handle = 8; // → EffectRecord; 0 = none
+    uint32 extra_summon_effect_handle = 9;     // → EffectRecord; 0 = none
+    repeated uint32 tribute_card_handles = 10; // card_set tributes
+    repeated uint32 summon_cost_effect_handles = 11; // effect_set summon_cost_effects
+}
+
+// SpSummonRule: special-summon rule-check framing (Fusion, Synchro, Xyz, etc.).
+// spsummon_cost_effect_handles serializes effect_set spsummon_cost_effects.
+message ProcSpSummonRule {
+    uint32 step = 1;
+    uint32 sumplayer = 2;           // uint8 in C++
+    bool is_mid_chain = 3;
+    uint32 summon_type = 4;         // uint32 in C++
+    uint32 target_card_handle = 5;  // → CardRecord; 0 = nullptr
+    uint32 summon_proc_effect_handle = 6; // → EffectRecord; 0 = none
+    uint32 cards_to_summon_group_handle = 7; // → GroupRecord; 0 = nullptr
+    repeated uint32 spsummon_cost_effect_handles = 8; // effect_set spsummon_cost_effects
+}
+
+// SpSummonRuleGroup: group special-summon rule check (e.g. Pendulum summon).
+message ProcSpSummonRuleGroup {
+    uint32 step = 1;
+    uint32 sumplayer = 2;           // uint8 in C++
+    uint32 summon_type = 3;         // uint32 in C++
+}
+
+// MonsterSet: face-down defence-position monster set.
+// tribute_card_handles serializes card_set tributes (tributes already selected).
+message ProcMonsterSet {
+    uint32 step = 1;
+    uint32 setplayer = 2;           // uint8 in C++
+    uint32 min_tribute = 3;         // uint8 in C++
+    uint32 max_allowed_tributes = 4; // uint8 in C++
+    bool ignore_count = 5;
+    uint32 zone = 6;                // uint32 in C++
+    uint32 target_card_handle = 7;  // → CardRecord; 0 = nullptr
+    uint32 summon_procedure_effect_handle = 8; // → EffectRecord; 0 = none
+    uint32 extra_summon_effect_handle = 9;     // → EffectRecord; 0 = none
+    repeated uint32 tribute_card_handles = 10; // card_set tributes
+}
+
+// FlipSummon: flip-summon framing.
+// flip_summon_cost_effect_handles serializes effect_set flip_summon_cost_effects.
+message ProcFlipSummon {
+    uint32 step = 1;
+    uint32 sumplayer = 2;           // uint8 in C++
+    uint32 target_card_handle = 3;  // → CardRecord; 0 = nullptr
+    repeated uint32 flip_summon_cost_effect_handles = 4; // effect_set
+}
+
+// SpSummon: special-summon execution (group of cards moving to field).
+message ProcSpSummon {
+    uint32 step = 1;
+    uint32 reason_player = 2;       // uint8 in C++
+    uint32 zone = 3;                // uint32 in C++
+    uint32 reason_effect_handle = 4; // → EffectRecord; 0 = none/freed
+    uint32 targets_group_handle = 5; // → GroupRecord; 0 = nullptr
+}
+
+// SpSummonStep: per-card step within a SpSummon sequence.
+// spsummon_cost_effect_handles serializes effect_set spsummon_cost_effects.
+message ProcSpSummonStep {
+    uint32 step = 1;
+    uint32 zone = 2;                // uint32 in C++
+    uint32 targets_group_handle = 3; // → GroupRecord; 0 = nullptr
+    uint32 target_card_handle = 4;  // → CardRecord; 0 = nullptr
+    repeated uint32 spsummon_cost_effect_handles = 5; // effect_set
+}
+
+// ChangePos: card position change (ATK↔DEF flip).
+// to_grave_card_handles serializes card_set to_grave_set (cards sent to grave
+// due to inability to change to target position).
+message ProcChangePos {
+    uint32 step = 1;
+    uint32 reason_player = 2;       // uint8 in C++
+    bool enable = 3;
+    bool oppo_selection = 4;
+    uint32 reason_effect_handle = 5; // → EffectRecord; 0 = none/freed
+    uint32 targets_group_handle = 6; // → GroupRecord; 0 = nullptr
+    repeated uint32 to_grave_card_handles = 7; // card_set to_grave_set
 }

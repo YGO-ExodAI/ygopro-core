@@ -702,6 +702,170 @@ bool load_processor_unit_into(
                 static_cast<uint8_t>(m.count()));
             return true;
         }
+        // ── Tier 5 (chunk 9d): SpellSet / SummonRule / MonsterSet clusters ──
+        case ocg::state::ProcessorUnit::kSpellSet: {
+            const auto& m = src_unit.spell_set();
+            card* target = hc.lookup(m.target_card_handle());
+            effect* reff = he.lookup(m.reason_effect_handle());
+            Processors::emplace_variant<Processors::SpellSet>(
+                dst, static_cast<uint16_t>(m.step()),
+                static_cast<uint8_t>(m.setplayer()),
+                static_cast<uint8_t>(m.toplayer()),
+                target, reff);
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kSpellSetGroup: {
+            const auto& m = src_unit.spell_set_group();
+            group* ptarget = hg.lookup(m.ptarget_group_handle());
+            effect* reff = he.lookup(m.reason_effect_handle());
+            Processors::emplace_variant<Processors::SpellSetGroup>(
+                dst, static_cast<uint16_t>(m.step()),
+                static_cast<uint8_t>(m.setplayer()),
+                static_cast<uint8_t>(m.toplayer()),
+                ptarget, m.confirm(), reff);
+            if (auto* p = Processors::get_opt_variant<Processors::SpellSetGroup>(
+                    dst.back())) {
+                for (const uint32_t h : m.set_card_handles()) {
+                    if (card* c = hc.lookup(h)) p->set_cards.insert(c);
+                }
+            }
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kSummonRule: {
+            const auto& m = src_unit.summon_rule();
+            card* target = hc.lookup(m.target_card_handle());
+            effect* proc = he.lookup(m.summon_procedure_effect_handle());
+            Processors::emplace_variant<Processors::SummonRule>(
+                dst, static_cast<uint16_t>(m.step()),
+                static_cast<uint8_t>(m.sumplayer()),
+                target, proc,
+                m.ignore_count(),
+                static_cast<uint8_t>(m.min_tribute()),
+                m.zone());
+            if (auto* p = Processors::get_opt_variant<Processors::SummonRule>(
+                    dst.back())) {
+                p->max_allowed_tributes =
+                    static_cast<uint8_t>(m.max_allowed_tributes());
+                p->extra_summon_effect =
+                    he.lookup(m.extra_summon_effect_handle());
+                for (const uint32_t h : m.tribute_card_handles()) {
+                    if (card* c = hc.lookup(h)) p->tributes.insert(c);
+                }
+                for (const uint32_t h : m.summon_cost_effect_handles()) {
+                    p->summon_cost_effects.push_back(he.lookup(h));
+                }
+            }
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kSpSummonRule: {
+            const auto& m = src_unit.sp_summon_rule();
+            card* target = hc.lookup(m.target_card_handle());
+            Processors::emplace_variant<Processors::SpSummonRule>(
+                dst, static_cast<uint16_t>(m.step()),
+                static_cast<uint8_t>(m.sumplayer()),
+                target, m.summon_type(),
+                m.is_mid_chain(),
+                he.lookup(m.summon_proc_effect_handle()));
+            if (auto* p = Processors::get_opt_variant<Processors::SpSummonRule>(
+                    dst.back())) {
+                p->cards_to_summon_g =
+                    hg.lookup(m.cards_to_summon_group_handle());
+                for (const uint32_t h : m.spsummon_cost_effect_handles()) {
+                    p->spsummon_cost_effects.push_back(he.lookup(h));
+                }
+            }
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kSpSummonRuleGroup: {
+            const auto& m = src_unit.sp_summon_rule_group();
+            Processors::emplace_variant<Processors::SpSummonRuleGroup>(
+                dst, static_cast<uint16_t>(m.step()),
+                static_cast<uint8_t>(m.sumplayer()),
+                m.summon_type());
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kMonsterSet: {
+            const auto& m = src_unit.monster_set();
+            card* target = hc.lookup(m.target_card_handle());
+            effect* proc = he.lookup(m.summon_procedure_effect_handle());
+            Processors::emplace_variant<Processors::MonsterSet>(
+                dst, static_cast<uint16_t>(m.step()),
+                static_cast<uint8_t>(m.setplayer()),
+                target, proc,
+                m.ignore_count(),
+                static_cast<uint8_t>(m.min_tribute()),
+                m.zone());
+            if (auto* p = Processors::get_opt_variant<Processors::MonsterSet>(
+                    dst.back())) {
+                p->max_allowed_tributes =
+                    static_cast<uint8_t>(m.max_allowed_tributes());
+                p->extra_summon_effect =
+                    he.lookup(m.extra_summon_effect_handle());
+                for (const uint32_t h : m.tribute_card_handles()) {
+                    if (card* c = hc.lookup(h)) p->tributes.insert(c);
+                }
+            }
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kFlipSummon: {
+            const auto& m = src_unit.flip_summon();
+            card* target = hc.lookup(m.target_card_handle());
+            Processors::emplace_variant<Processors::FlipSummon>(
+                dst, static_cast<uint16_t>(m.step()),
+                static_cast<uint8_t>(m.sumplayer()),
+                target);
+            if (auto* p = Processors::get_opt_variant<Processors::FlipSummon>(
+                    dst.back())) {
+                for (const uint32_t h : m.flip_summon_cost_effect_handles()) {
+                    p->flip_summon_cost_effects.push_back(he.lookup(h));
+                }
+            }
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kSpSummon: {
+            const auto& m = src_unit.sp_summon();
+            effect* reff = he.lookup(m.reason_effect_handle());
+            group* targets = hg.lookup(m.targets_group_handle());
+            Processors::emplace_variant<Processors::SpSummon>(
+                dst, static_cast<uint16_t>(m.step()),
+                reff,
+                static_cast<uint8_t>(m.reason_player()),
+                targets, m.zone());
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kSpSummonStep: {
+            const auto& m = src_unit.sp_summon_step();
+            group* targets = hg.lookup(m.targets_group_handle());
+            card* target = hc.lookup(m.target_card_handle());
+            Processors::emplace_variant<Processors::SpSummonStep>(
+                dst, static_cast<uint16_t>(m.step()),
+                targets, target, m.zone());
+            if (auto* p = Processors::get_opt_variant<Processors::SpSummonStep>(
+                    dst.back())) {
+                for (const uint32_t h : m.spsummon_cost_effect_handles()) {
+                    p->spsummon_cost_effects.push_back(he.lookup(h));
+                }
+            }
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kChangePos: {
+            const auto& m = src_unit.change_pos();
+            effect* reff = he.lookup(m.reason_effect_handle());
+            group* targets = hg.lookup(m.targets_group_handle());
+            Processors::emplace_variant<Processors::ChangePos>(
+                dst, static_cast<uint16_t>(m.step()),
+                targets, reff,
+                static_cast<uint8_t>(m.reason_player()),
+                m.enable());
+            if (auto* p = Processors::get_opt_variant<Processors::ChangePos>(
+                    dst.back())) {
+                p->oppo_selection = m.oppo_selection();
+                for (const uint32_t h : m.to_grave_card_handles()) {
+                    if (card* c = hc.lookup(h)) p->to_grave_set.insert(c);
+                }
+            }
+            return true;
+        }
         case ocg::state::ProcessorUnit::UNIT_NOT_SET:
             if (load_error) {
                 *load_error = "ProcessorUnit in '" +

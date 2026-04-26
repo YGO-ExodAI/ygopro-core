@@ -2339,6 +2339,202 @@ bool test_chunk9b_tier3_synthetic_round_trip() {
 }
 
 // ---------------------------------------------------------------------------
+// Tier 5 (chunk 9d) — synthetic round-trip for SpellSet / SummonRule /
+// MonsterSet clusters (10 variants).  Mirrors test_chunk9b_tier3_synthetic_round_trip.
+// ---------------------------------------------------------------------------
+
+bool test_chunk9d_tier5_synthetic_round_trip() {
+    OCG_Duel orig = make_chunk5a_duel(0x9D05);
+    CHECK_TRUE(orig != nullptr, "create orig");
+    populate_simple_deck(orig);
+
+    auto* d_orig = static_cast<duel*>(orig);
+    auto& units = d_orig->game_field->core.units;
+    units.clear();
+
+    // Pick two cards for pointer fields — one for target, one for tribute.
+    card* pcard0 = d_orig->game_field->player[0].list_main[0];
+    card* pcard1 = d_orig->game_field->player[0].list_main[1];
+    const uint32_t pcard0_id = pcard0->cardid;
+    const uint32_t pcard1_id = pcard1->cardid;
+
+    // SpellSet: step=2, setplayer=0, toplayer=0, target=pcard0, reff=nullptr.
+    Processors::emplace_variant<Processors::SpellSet>(
+        units, uint16_t{2}, uint8_t{0}, uint8_t{0}, pcard0, nullptr);
+
+    // SpellSetGroup: step=1, setplayer=0, toplayer=1, ptarget=nullptr,
+    //               confirm=true, reff=nullptr.  set_cards populated post-emplace.
+    Processors::emplace_variant<Processors::SpellSetGroup>(
+        units, uint16_t{1}, uint8_t{0}, uint8_t{1},
+        static_cast<group*>(nullptr), true, nullptr);
+    if (auto* p = Processors::get_opt_variant<Processors::SpellSetGroup>(
+            units.back())) {
+        p->set_cards.insert(pcard0);
+        p->set_cards.insert(pcard1);
+    }
+
+    // SummonRule: step=3, sumplayer=0, target=pcard0, proc=nullptr,
+    //            ignore_count=false, min_tribute=1, zone=0x1F.
+    Processors::emplace_variant<Processors::SummonRule>(
+        units, uint16_t{3}, uint8_t{0}, pcard0, nullptr,
+        false, uint8_t{1}, uint32_t{0x1F});
+    if (auto* p = Processors::get_opt_variant<Processors::SummonRule>(
+            units.back())) {
+        p->max_allowed_tributes = 2;
+        p->tributes.insert(pcard1);
+    }
+
+    // SpSummonRule: step=1, sumplayer=1, target=pcard0, summon_type=0x20,
+    //              is_mid_chain=true, proc=nullptr.
+    Processors::emplace_variant<Processors::SpSummonRule>(
+        units, uint16_t{1}, uint8_t{1}, pcard0, uint32_t{0x20},
+        true, nullptr);
+
+    // SpSummonRuleGroup: step=2, sumplayer=0, summon_type=0x10.
+    Processors::emplace_variant<Processors::SpSummonRuleGroup>(
+        units, uint16_t{2}, uint8_t{0}, uint32_t{0x10});
+
+    // MonsterSet: step=4, setplayer=0, target=pcard1, proc=nullptr,
+    //            ignore_count=true, min_tribute=0, zone=0x1F.
+    Processors::emplace_variant<Processors::MonsterSet>(
+        units, uint16_t{4}, uint8_t{0}, pcard1, nullptr,
+        true, uint8_t{0}, uint32_t{0x1F});
+    if (auto* p = Processors::get_opt_variant<Processors::MonsterSet>(
+            units.back())) {
+        p->max_allowed_tributes = 1;
+    }
+
+    // FlipSummon: step=1, sumplayer=1, target=pcard0.
+    Processors::emplace_variant<Processors::FlipSummon>(
+        units, uint16_t{1}, uint8_t{1}, pcard0);
+
+    // SpSummon: step=2, reason_effect=nullptr, reason_player=0,
+    //           targets=nullptr, zone=0xFF.
+    Processors::emplace_variant<Processors::SpSummon>(
+        units, uint16_t{2}, nullptr, uint8_t{0},
+        static_cast<group*>(nullptr), uint32_t{0xFF});
+
+    // SpSummonStep: step=1, targets=nullptr, target=pcard1, zone=0x01.
+    Processors::emplace_variant<Processors::SpSummonStep>(
+        units, uint16_t{1},
+        static_cast<group*>(nullptr), pcard1, uint32_t{0x01});
+
+    // ChangePos: step=3, targets=nullptr, reason_effect=nullptr,
+    //            reason_player=1, enable=true.
+    Processors::emplace_variant<Processors::ChangePos>(
+        units, uint16_t{3},
+        static_cast<group*>(nullptr), nullptr,
+        uint8_t{1}, true);
+    if (auto* p = Processors::get_opt_variant<Processors::ChangePos>(
+            units.back())) {
+        p->oppo_selection = true;
+        p->to_grave_set.insert(pcard0);
+    }
+
+    const size_t expected_units = units.size();
+
+    void* blob = nullptr;
+    uint32_t size = 0;
+    CHECK_EQ(OCG_DuelSaveState(orig, &blob, &size), OCG_SAVE_OK,
+             "save with all Tier 5 units");
+
+    OCG_DuelOptions opts = make_chunk5a_load_options();
+    OCG_Duel loaded = nullptr;
+    CHECK_EQ(OCG_DuelLoadState(blob, size, &opts, &loaded), OCG_LOAD_OK,
+             "load Tier 5 blob");
+
+    auto* d_loaded = static_cast<duel*>(loaded);
+    auto& ul = d_loaded->game_field->core.units;
+    CHECK_EQ(ul.size(), expected_units, "unit count round-trips");
+
+    auto it = ul.begin();
+    auto pop = [&]() -> processor_unit& { processor_unit& u = *it; ++it; return u; };
+
+    if (auto* p = Processors::get_opt_variant<Processors::SpellSet>(pop())) {
+        CHECK_EQ(p->step, 2,          "SpellSet.step");
+        CHECK_EQ(p->setplayer, 0,     "SpellSet.setplayer");
+        CHECK_EQ(p->toplayer, 0,      "SpellSet.toplayer");
+        CHECK_TRUE(p->target != nullptr, "SpellSet.target non-null");
+        CHECK_EQ(p->target->cardid, pcard0_id, "SpellSet.target cardid");
+    } else { CHECK_TRUE(false, "SpellSet variant"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::SpellSetGroup>(pop())) {
+        CHECK_EQ(p->step, 1,          "SpellSetGroup.step");
+        CHECK_EQ(p->toplayer, 1,      "SpellSetGroup.toplayer");
+        CHECK_TRUE(p->confirm,        "SpellSetGroup.confirm");
+        CHECK_EQ(p->set_cards.size(), size_t{2}, "SpellSetGroup.set_cards size");
+    } else { CHECK_TRUE(false, "SpellSetGroup variant"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::SummonRule>(pop())) {
+        CHECK_EQ(p->step, 3,          "SummonRule.step");
+        CHECK_EQ(p->sumplayer, 0,     "SummonRule.sumplayer");
+        CHECK_EQ(p->min_tribute, 1,   "SummonRule.min_tribute");
+        CHECK_EQ(p->max_allowed_tributes, 2, "SummonRule.max_allowed_tributes");
+        CHECK_TRUE(!p->ignore_count,  "SummonRule.ignore_count");
+        CHECK_EQ(p->zone, 0x1Fu,      "SummonRule.zone");
+        CHECK_TRUE(p->target != nullptr, "SummonRule.target non-null");
+        CHECK_EQ(p->tributes.size(), size_t{1}, "SummonRule.tributes size");
+    } else { CHECK_TRUE(false, "SummonRule variant"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::SpSummonRule>(pop())) {
+        CHECK_EQ(p->step, 1,          "SpSummonRule.step");
+        CHECK_EQ(p->sumplayer, 1,     "SpSummonRule.sumplayer");
+        CHECK_TRUE(p->is_mid_chain,   "SpSummonRule.is_mid_chain");
+        CHECK_EQ(p->summon_type, 0x20u, "SpSummonRule.summon_type");
+        CHECK_TRUE(p->target != nullptr, "SpSummonRule.target non-null");
+    } else { CHECK_TRUE(false, "SpSummonRule variant"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::SpSummonRuleGroup>(pop())) {
+        CHECK_EQ(p->step, 2,          "SpSummonRuleGroup.step");
+        CHECK_EQ(p->sumplayer, 0,     "SpSummonRuleGroup.sumplayer");
+        CHECK_EQ(p->summon_type, 0x10u, "SpSummonRuleGroup.summon_type");
+    } else { CHECK_TRUE(false, "SpSummonRuleGroup variant"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::MonsterSet>(pop())) {
+        CHECK_EQ(p->step, 4,          "MonsterSet.step");
+        CHECK_EQ(p->setplayer, 0,     "MonsterSet.setplayer");
+        CHECK_EQ(p->min_tribute, 0,   "MonsterSet.min_tribute");
+        CHECK_EQ(p->max_allowed_tributes, 1, "MonsterSet.max_allowed_tributes");
+        CHECK_TRUE(p->ignore_count,   "MonsterSet.ignore_count");
+        CHECK_TRUE(p->target != nullptr, "MonsterSet.target non-null");
+        CHECK_EQ(p->target->cardid, pcard1_id, "MonsterSet.target cardid");
+    } else { CHECK_TRUE(false, "MonsterSet variant"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::FlipSummon>(pop())) {
+        CHECK_EQ(p->step, 1,          "FlipSummon.step");
+        CHECK_EQ(p->sumplayer, 1,     "FlipSummon.sumplayer");
+        CHECK_TRUE(p->target != nullptr, "FlipSummon.target non-null");
+        CHECK_EQ(p->target->cardid, pcard0_id, "FlipSummon.target cardid");
+    } else { CHECK_TRUE(false, "FlipSummon variant"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::SpSummon>(pop())) {
+        CHECK_EQ(p->step, 2,          "SpSummon.step");
+        CHECK_EQ(p->reason_player, 0, "SpSummon.reason_player");
+        CHECK_EQ(p->zone, 0xFFu,      "SpSummon.zone");
+    } else { CHECK_TRUE(false, "SpSummon variant"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::SpSummonStep>(pop())) {
+        CHECK_EQ(p->step, 1,          "SpSummonStep.step");
+        CHECK_EQ(p->zone, 0x01u,      "SpSummonStep.zone");
+        CHECK_TRUE(p->target != nullptr, "SpSummonStep.target non-null");
+        CHECK_EQ(p->target->cardid, pcard1_id, "SpSummonStep.target cardid");
+    } else { CHECK_TRUE(false, "SpSummonStep variant"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::ChangePos>(pop())) {
+        CHECK_EQ(p->step, 3,          "ChangePos.step");
+        CHECK_EQ(p->reason_player, 1, "ChangePos.reason_player");
+        CHECK_TRUE(p->enable,         "ChangePos.enable");
+        CHECK_TRUE(p->oppo_selection, "ChangePos.oppo_selection");
+        CHECK_EQ(p->to_grave_set.size(), size_t{1}, "ChangePos.to_grave_set size");
+    } else { CHECK_TRUE(false, "ChangePos variant"); }
+
+    OCG_FreeSaveBuffer(blob);
+    OCG_DestroyDuel(orig);
+    OCG_DestroyDuel(loaded);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // Free-buffer is safe on null
 // ---------------------------------------------------------------------------
 
@@ -2426,6 +2622,9 @@ int main() {
          &test_chunk9b_v1_blob_rejected_loud},
         {"chunk9b_tier3_synthetic_round_trip",
          &test_chunk9b_tier3_synthetic_round_trip},
+        // Chunk 9d Tier 5 — SpellSet / SummonRule / MonsterSet clusters
+        {"chunk9d_tier5_synthetic_round_trip",
+         &test_chunk9d_tier5_synthetic_round_trip},
         // Chunk 4 perf scaffold (informational; not gated)
         {"perf_scaffold_vanilla", &test_perf_scaffold_vanilla},
     };

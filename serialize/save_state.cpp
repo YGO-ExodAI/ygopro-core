@@ -716,6 +716,123 @@ OCG_SaveStatus write_processor_unit_inner(
                 m->set_flag(v.flag);
                 m->set_disable_field(v.disable_field);
                 return OCG_SAVE_OK;
+            // ── Tier 5 (chunk 9d): SpellSet / SummonRule / MonsterSet clusters ──
+            } else if constexpr (std::is_same_v<T, Processors::SpellSet>) {
+                auto* m = dst_unit->mutable_spell_set();
+                m->set_step(v.step);
+                m->set_setplayer(v.setplayer);
+                m->set_toplayer(v.toplayer);
+                m->set_target_card_handle(hc_assign_safe(hc, v.target));
+                m->set_reason_effect_handle(
+                    assign_effect_if_live(he, v.reason_effect, live_effects));
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::SpellSetGroup>) {
+                auto* m = dst_unit->mutable_spell_set_group();
+                m->set_step(v.step);
+                m->set_setplayer(v.setplayer);
+                m->set_toplayer(v.toplayer);
+                m->set_confirm(v.confirm);
+                m->set_ptarget_group_handle(hg.assign(v.ptarget));
+                m->set_reason_effect_handle(
+                    assign_effect_if_live(he, v.reason_effect, live_effects));
+                for (card* c : v.set_cards)
+                    m->add_set_card_handles(hc_assign_safe(hc, c));
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::SummonRule>) {
+                auto* m = dst_unit->mutable_summon_rule();
+                m->set_step(v.step);
+                m->set_sumplayer(v.sumplayer);
+                m->set_min_tribute(v.min_tribute);
+                m->set_max_allowed_tributes(v.max_allowed_tributes);
+                m->set_ignore_count(v.ignore_count);
+                m->set_zone(v.zone);
+                m->set_target_card_handle(hc_assign_safe(hc, v.target));
+                m->set_summon_procedure_effect_handle(
+                    assign_effect_if_live(he, v.summon_procedure_effect, live_effects));
+                m->set_extra_summon_effect_handle(
+                    assign_effect_if_live(he, v.extra_summon_effect, live_effects));
+                for (card* c : v.tributes)
+                    m->add_tribute_card_handles(hc_assign_safe(hc, c));
+                for (effect* e : v.summon_cost_effects)
+                    m->add_summon_cost_effect_handles(
+                        assign_effect_if_live(he, e, live_effects));
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::SpSummonRule>) {
+                auto* m = dst_unit->mutable_sp_summon_rule();
+                m->set_step(v.step);
+                m->set_sumplayer(v.sumplayer);
+                m->set_is_mid_chain(v.is_mid_chain);
+                m->set_summon_type(v.summon_type);
+                m->set_target_card_handle(hc_assign_safe(hc, v.target));
+                m->set_summon_proc_effect_handle(
+                    assign_effect_if_live(he, v.summon_proc_effect, live_effects));
+                m->set_cards_to_summon_group_handle(hg.assign(v.cards_to_summon_g));
+                for (effect* e : v.spsummon_cost_effects)
+                    m->add_spsummon_cost_effect_handles(
+                        assign_effect_if_live(he, e, live_effects));
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::SpSummonRuleGroup>) {
+                auto* m = dst_unit->mutable_sp_summon_rule_group();
+                m->set_step(v.step);
+                m->set_sumplayer(v.sumplayer);
+                m->set_summon_type(v.summon_type);
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::MonsterSet>) {
+                auto* m = dst_unit->mutable_monster_set();
+                m->set_step(v.step);
+                m->set_setplayer(v.setplayer);
+                m->set_min_tribute(v.min_tribute);
+                m->set_max_allowed_tributes(v.max_allowed_tributes);
+                m->set_ignore_count(v.ignore_count);
+                m->set_zone(v.zone);
+                m->set_target_card_handle(hc_assign_safe(hc, v.target));
+                m->set_summon_procedure_effect_handle(
+                    assign_effect_if_live(he, v.summon_procedure_effect, live_effects));
+                m->set_extra_summon_effect_handle(
+                    assign_effect_if_live(he, v.extra_summon_effect, live_effects));
+                for (card* c : v.tributes)
+                    m->add_tribute_card_handles(hc_assign_safe(hc, c));
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::FlipSummon>) {
+                auto* m = dst_unit->mutable_flip_summon();
+                m->set_step(v.step);
+                m->set_sumplayer(v.sumplayer);
+                m->set_target_card_handle(hc_assign_safe(hc, v.target));
+                for (effect* e : v.flip_summon_cost_effects)
+                    m->add_flip_summon_cost_effect_handles(
+                        assign_effect_if_live(he, e, live_effects));
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::SpSummon>) {
+                auto* m = dst_unit->mutable_sp_summon();
+                m->set_step(v.step);
+                m->set_reason_player(v.reason_player);
+                m->set_zone(v.zone);
+                m->set_reason_effect_handle(
+                    assign_effect_if_live(he, v.reason_effect, live_effects));
+                m->set_targets_group_handle(hg.assign(v.targets));
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::SpSummonStep>) {
+                auto* m = dst_unit->mutable_sp_summon_step();
+                m->set_step(v.step);
+                m->set_zone(v.zone);
+                m->set_targets_group_handle(hg.assign(v.targets));
+                m->set_target_card_handle(hc_assign_safe(hc, v.target));
+                for (effect* e : v.spsummon_cost_effects)
+                    m->add_spsummon_cost_effect_handles(
+                        assign_effect_if_live(he, e, live_effects));
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::ChangePos>) {
+                auto* m = dst_unit->mutable_change_pos();
+                m->set_step(v.step);
+                m->set_reason_player(v.reason_player);
+                m->set_enable(v.enable);
+                m->set_oppo_selection(v.oppo_selection);
+                m->set_reason_effect_handle(
+                    assign_effect_if_live(he, v.reason_effect, live_effects));
+                m->set_targets_group_handle(hg.assign(v.targets));
+                for (card* c : v.to_grave_set)
+                    m->add_to_grave_card_handles(hc_assign_safe(hc, c));
+                return OCG_SAVE_OK;
             } else {
                 if (refuse_reason) {
                     char buf[240];
