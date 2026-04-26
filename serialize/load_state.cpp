@@ -779,6 +779,17 @@ OCG_LoadStatus deserialize_duel(const void* buffer, std::size_t size,
     }
     prof.mark("duel_ctor");
 
+    // Load bootstrap scripts into the fresh Lua VM before any new_card call.
+    // Mirrors what YGO_CreateDuel does in edopro.h: constant.lua + utility.lua
+    // are loaded immediately after OCG_CreateDuel but before the first
+    // OCG_DuelNewCard call.  utility.lua defines GetID(), which every
+    // c<code>.lua script calls at the top level (line 3).  Without these two
+    // loads, all card scripts fail with "attempt to call a nil value (global
+    // 'GetID')" and the engine stalls after OCG_DuelLoadState returns.
+    // See: YGO_CreateDuel in ygoenv/edopro/edopro.h.
+    d->read_script("constant.lua");
+    d->read_script("utility.lua");
+
     // Restore RNG state (must follow construction; ctor seeds from options).
     if (state.rng().xoshiro_state_size() != 4) {
         delete d;
