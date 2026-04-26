@@ -550,6 +550,27 @@ message ProcessorUnit {
         ProcAnnounceCard       announce_card          = 123;
         ProcAnnounceNumber     announce_number        = 124;
         ProcRockPaperScissors  rps                    = 125;
+        // ── Tier 4 (chunk 9c): Process<false> non-Select variants.
+        // Unlocks battle-attack, trap-react (both MP1 and battle phase),
+        // and other categories that previously had Process<false> units
+        // on the stack alongside the active Select* prompt. All pointer
+        // fields serialize as uint32 handles (0 = null/freed).
+        ProcAddChain           add_chain              = 126;
+        ProcSolveChain         solve_chain            = 127;
+        ProcPointEvent         point_event            = 128;
+        ProcQuickEffect        quick_effect           = 129;
+        ProcForcedBattle       forced_battle          = 130;
+        ProcSortChain          sort_chain             = 131;
+        ProcAttackDisable      attack_disable         = 132;
+        ProcActivateEffect     activate_effect        = 133;
+        ProcSolveContinuous    solve_continuous       = 134;
+        ProcExecuteCost        execute_cost           = 135;
+        ProcExecuteOperation   execute_operation      = 136;
+        ProcExecuteTarget      execute_target         = 137;
+        ProcMoveToField        move_to_field          = 138;
+        ProcBattleCommand      battle_command         = 139;
+        ProcSelfDestroyUnique  self_destroy_unique    = 140;
+        ProcSelectDisField     select_dis_field       = 141;
     }
 }
 
@@ -864,4 +885,139 @@ message TableDef {
     // of re-serializing entries.
     uint32 handle = 1;
     repeated TableEntry entries = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Tier 4 (chunk 9c): Process<false> non-Select processor unit messages.
+// These appear on core.units/subunits alongside the active Select* prompt
+// during battle phase, chain resolution, effect activation, etc.
+// ---------------------------------------------------------------------------
+
+message ProcAddChain {
+    uint32 step = 1;
+    bool is_activated_effect = 2;
+}
+
+message ProcSolveChain {
+    uint32 step = 1;
+    bool skip_trigger = 2;
+    bool skip_freechain = 3;
+    bool skip_new = 4;
+    int32 backed_up_operation = 5;
+}
+
+message ProcPointEvent {
+    uint32 step = 1;
+    bool skip_trigger = 2;
+    bool skip_freechain = 3;
+    bool skip_new = 4;
+}
+
+message ProcQuickEffect {
+    uint32 step = 1;
+    bool skip_freechain = 2;
+    bool is_opponent = 3;
+    uint32 priority_player = 4;     // uint8 in C++
+}
+
+message ProcForcedBattle {
+    uint32 step = 1;
+    uint32 backup_phase = 2;        // uint16 in C++
+}
+
+message ProcSortChain {
+    uint32 step = 1;
+    uint32 playerid = 2;            // uint8 in C++
+}
+
+message ProcAttackDisable {
+    uint32 step = 1;
+}
+
+// ActivateEffect carries a single effect* — routed through assign_effect_if_live.
+message ProcActivateEffect {
+    uint32 step = 1;
+    uint32 peffect_handle = 2;      // → EffectRecord; 0 = none/freed
+}
+
+message ProcSolveContinuous {
+    uint32 step = 1;
+    uint32 reason_player = 2;       // uint8 in C++
+    uint32 reason_effect_handle = 3; // → EffectRecord; 0 = none/freed
+}
+
+// ExecuteCost / ExecuteOperation / ExecuteTarget share the same shape.
+message ProcExecuteCost {
+    uint32 step = 1;
+    uint32 triggering_player = 2;               // uint8 in C++
+    bool shuffle_check_was_disabled = 3;
+    uint32 triggering_effect_handle = 4;        // → EffectRecord; 0 = none/freed
+}
+
+message ProcExecuteOperation {
+    uint32 step = 1;
+    uint32 triggering_player = 2;
+    bool shuffle_check_was_disabled = 3;
+    uint32 triggering_effect_handle = 4;
+}
+
+message ProcExecuteTarget {
+    uint32 step = 1;
+    uint32 triggering_player = 2;
+    bool shuffle_check_was_disabled = 3;
+    uint32 triggering_effect_handle = 4;
+}
+
+// MoveToField carries a single card* (target) plus scalar bools/uint8s.
+message ProcMoveToField {
+    uint32 step = 1;
+    bool enable = 2;
+    uint32 ret = 3;                 // uint8 in C++
+    bool pzone = 4;
+    uint32 zone = 5;                // uint8 in C++
+    bool rule = 6;
+    uint32 location_reason = 7;    // uint8 in C++
+    bool confirm = 8;
+    uint32 target_card_handle = 9; // → CardRecord; 0 = nullptr
+}
+
+// BattleCommand — the main process unit during battle phase. Carries
+// group*, card*, effect* and a multimap<effect*, card*> (must_attack_map).
+message BattleCommandMustAttackEntry {
+    uint32 effect_handle = 1;
+    uint32 card_handle = 2;
+}
+
+message ProcBattleCommand {
+    uint32 step = 1;
+    uint32 phase_to_change_to = 2;                              // uint16 in C++
+    bool forced_attack = 3;
+    bool forced_attack_done = 4;
+    bool is_replaying_attack = 5;
+    bool attack_announce_failed = 6;
+    bool repeat_battle_phase = 7;
+    bool second_battle_phase_is_optional = 8;
+    bool previous_point_event_had_any_trigger_to_resolve = 9;
+    uint32 reason_player = 10;                                  // uint8 in C++
+    uint32 damage_change_effect_handle = 11;    // → EffectRecord; 0 = none/freed
+    uint32 cards_destroyed_by_battle_group_handle = 12; // → GroupRecord; 0 = nullptr
+    uint32 reason_card_handle = 13;             // → CardRecord; 0 = nullptr
+    repeated BattleCommandMustAttackEntry must_attack_map = 14;
+}
+
+// SelfDestroyUnique carries a card* (the unique card) plus a playerid.
+message ProcSelfDestroyUnique {
+    uint32 step = 1;
+    uint32 playerid = 2;            // uint8 in C++
+    uint32 unique_card_handle = 3;  // → CardRecord; 0 = nullptr
+}
+
+// SelectDisField is a SelectPlace subtype with disable_field always true.
+// Separate oneof tag so the load path can reconstruct the exact C++ type.
+message ProcSelectDisField {
+    uint32 step = 1;
+    uint32 playerid = 2;            // uint8 in C++
+    uint32 count = 3;               // uint8 in C++
+    uint32 flag = 4;                // uint32 in C++
+    bool disable_field = 5;         // always true; carried for self-documentation
 }

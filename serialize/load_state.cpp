@@ -273,6 +273,8 @@ bool load_processor_unit_into(
         const ocg::state::ProcessorUnit& src_unit,
         std::list<processor_unit>& dst,
         HandleResolver<card>& hc,
+        const HandleResolver<effect>& he,
+        HandleResolver<group>& hg,
         const char* list_name,
         int idx,
         std::string* load_error) {
@@ -518,6 +520,188 @@ bool load_processor_unit_into(
             }
             return true;
         }
+        // ── Tier 4 (chunk 9c): Process<false> non-Select variants ────────
+        case ocg::state::ProcessorUnit::kAddChain: {
+            const auto& m = src_unit.add_chain();
+            Processors::emplace_variant<Processors::AddChain>(
+                dst, static_cast<uint16_t>(m.step()));
+            if (auto* p = Processors::get_opt_variant<Processors::AddChain>(
+                    dst.back())) {
+                p->is_activated_effect = m.is_activated_effect();
+            }
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kSolveChain: {
+            const auto& m = src_unit.solve_chain();
+            Processors::emplace_variant<Processors::SolveChain>(
+                dst, static_cast<uint16_t>(m.step()),
+                m.skip_trigger(), m.skip_freechain(), m.skip_new());
+            if (auto* p = Processors::get_opt_variant<Processors::SolveChain>(
+                    dst.back())) {
+                p->backed_up_operation = m.backed_up_operation();
+            }
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kPointEvent: {
+            const auto& m = src_unit.point_event();
+            Processors::emplace_variant<Processors::PointEvent>(
+                dst, static_cast<uint16_t>(m.step()),
+                m.skip_trigger(), m.skip_freechain(), m.skip_new());
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kQuickEffect: {
+            const auto& m = src_unit.quick_effect();
+            Processors::emplace_variant<Processors::QuickEffect>(
+                dst, static_cast<uint16_t>(m.step()),
+                m.skip_freechain(),
+                static_cast<uint8_t>(m.priority_player()));
+            if (auto* p = Processors::get_opt_variant<Processors::QuickEffect>(
+                    dst.back())) {
+                p->is_opponent = m.is_opponent();
+            }
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kForcedBattle: {
+            const auto& m = src_unit.forced_battle();
+            Processors::emplace_variant<Processors::ForcedBattle>(
+                dst, static_cast<uint16_t>(m.step()));
+            if (auto* p = Processors::get_opt_variant<Processors::ForcedBattle>(
+                    dst.back())) {
+                p->backup_phase = static_cast<uint16_t>(m.backup_phase());
+            }
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kSortChain: {
+            const auto& m = src_unit.sort_chain();
+            Processors::emplace_variant<Processors::SortChain>(
+                dst, static_cast<uint16_t>(m.step()),
+                static_cast<uint8_t>(m.playerid()));
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kAttackDisable: {
+            const auto& m = src_unit.attack_disable();
+            Processors::emplace_variant<Processors::AttackDisable>(
+                dst, static_cast<uint16_t>(m.step()));
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kActivateEffect: {
+            const auto& m = src_unit.activate_effect();
+            effect* peff = he.lookup(m.peffect_handle());
+            Processors::emplace_variant<Processors::ActivateEffect>(
+                dst, static_cast<uint16_t>(m.step()), peff);
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kSolveContinuous: {
+            const auto& m = src_unit.solve_continuous();
+            Processors::emplace_variant<Processors::SolveContinuous>(
+                dst, static_cast<uint16_t>(m.step()));
+            if (auto* p = Processors::get_opt_variant<Processors::SolveContinuous>(
+                    dst.back())) {
+                p->reason_player = static_cast<uint8_t>(m.reason_player());
+                p->reason_effect = he.lookup(m.reason_effect_handle());
+            }
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kExecuteCost: {
+            const auto& m = src_unit.execute_cost();
+            effect* teff = he.lookup(m.triggering_effect_handle());
+            Processors::emplace_variant<Processors::ExecuteCost>(
+                dst, static_cast<uint16_t>(m.step()),
+                teff,
+                static_cast<uint8_t>(m.triggering_player()));
+            if (auto* p = Processors::get_opt_variant<Processors::ExecuteCost>(
+                    dst.back())) {
+                p->shuffle_check_was_disabled = m.shuffle_check_was_disabled();
+            }
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kExecuteOperation: {
+            const auto& m = src_unit.execute_operation();
+            effect* teff = he.lookup(m.triggering_effect_handle());
+            Processors::emplace_variant<Processors::ExecuteOperation>(
+                dst, static_cast<uint16_t>(m.step()),
+                teff,
+                static_cast<uint8_t>(m.triggering_player()));
+            if (auto* p = Processors::get_opt_variant<Processors::ExecuteOperation>(
+                    dst.back())) {
+                p->shuffle_check_was_disabled = m.shuffle_check_was_disabled();
+            }
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kExecuteTarget: {
+            const auto& m = src_unit.execute_target();
+            effect* teff = he.lookup(m.triggering_effect_handle());
+            Processors::emplace_variant<Processors::ExecuteTarget>(
+                dst, static_cast<uint16_t>(m.step()),
+                teff,
+                static_cast<uint8_t>(m.triggering_player()));
+            if (auto* p = Processors::get_opt_variant<Processors::ExecuteTarget>(
+                    dst.back())) {
+                p->shuffle_check_was_disabled = m.shuffle_check_was_disabled();
+            }
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kMoveToField: {
+            const auto& m = src_unit.move_to_field();
+            card* target = hc.lookup(m.target_card_handle());
+            Processors::emplace_variant<Processors::MoveToField>(
+                dst, static_cast<uint16_t>(m.step()),
+                target,
+                m.enable(),
+                static_cast<uint8_t>(m.ret()),
+                m.pzone(),
+                static_cast<uint8_t>(m.zone()),
+                m.rule(),
+                static_cast<uint8_t>(m.location_reason()),
+                m.confirm());
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kBattleCommand: {
+            const auto& m = src_unit.battle_command();
+            group* gbattle = hg.lookup(m.cards_destroyed_by_battle_group_handle());
+            Processors::emplace_variant<Processors::BattleCommand>(
+                dst, static_cast<uint16_t>(m.step()),
+                gbattle,
+                m.forced_attack());
+            if (auto* p = Processors::get_opt_variant<Processors::BattleCommand>(
+                    dst.back())) {
+                p->phase_to_change_to = static_cast<uint16_t>(m.phase_to_change_to());
+                p->forced_attack_done = m.forced_attack_done();
+                p->is_replaying_attack = m.is_replaying_attack();
+                p->attack_announce_failed = m.attack_announce_failed();
+                p->repeat_battle_phase = m.repeat_battle_phase();
+                p->second_battle_phase_is_optional = m.second_battle_phase_is_optional();
+                p->previous_point_event_had_any_trigger_to_resolve =
+                    m.previous_point_event_had_any_trigger_to_resolve();
+                p->reason_player = static_cast<uint8_t>(m.reason_player());
+                p->damage_change_effect = he.lookup(m.damage_change_effect_handle());
+                p->reason_card = hc.lookup(m.reason_card_handle());
+                for (const auto& entry : m.must_attack_map()) {
+                    effect* peff = he.lookup(entry.effect_handle());
+                    card* pcard = hc.lookup(entry.card_handle());
+                    if (peff) p->must_attack_map.emplace(peff, pcard);
+                }
+            }
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kSelfDestroyUnique: {
+            const auto& m = src_unit.self_destroy_unique();
+            card* unique = hc.lookup(m.unique_card_handle());
+            Processors::emplace_variant<Processors::SelfDestroyUnique>(
+                dst, static_cast<uint16_t>(m.step()),
+                unique,
+                static_cast<uint8_t>(m.playerid()));
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kSelectDisField: {
+            const auto& m = src_unit.select_dis_field();
+            Processors::emplace_variant<Processors::SelectDisField>(
+                dst, static_cast<uint16_t>(m.step()),
+                static_cast<uint8_t>(m.playerid()),
+                m.flag(),
+                static_cast<uint8_t>(m.count()));
+            return true;
+        }
         case ocg::state::ProcessorUnit::UNIT_NOT_SET:
             if (load_error) {
                 *load_error = "ProcessorUnit in '" +
@@ -613,17 +797,18 @@ bool load_processor_state(const ocg::state::ProcessorState& src,
                            processor& core,
                            HandleResolver<card>& hc,
                            const HandleResolver<effect>& he,
+                           HandleResolver<group>& hg,
                            std::string* load_error) {
     core.units.clear();
     for (int i = 0; i < src.units_size(); ++i) {
-        if (!load_processor_unit_into(src.units(i), core.units, hc,
+        if (!load_processor_unit_into(src.units(i), core.units, hc, he, hg,
                                        "units", i, load_error)) {
             return false;
         }
     }
     core.subunits.clear();
     for (int i = 0; i < src.subunits_size(); ++i) {
-        if (!load_processor_unit_into(src.subunits(i), core.subunits, hc,
+        if (!load_processor_unit_into(src.subunits(i), core.subunits, hc, he, hg,
                                        "subunits", i, load_error)) {
             return false;
         }
@@ -995,7 +1180,7 @@ OCG_LoadStatus deserialize_duel(const void* buffer, std::size_t size,
     // -----------------------------------------------------------------
     if (d->game_field != nullptr && state.has_processor()) {
         if (!load_processor_state(state.processor(),
-                                   d->game_field->core, hc, he, load_error)) {
+                                   d->game_field->core, hc, he, hg, load_error)) {
             for (uint32_t i = 1; i <= state.cards_size(); ++i) {
                 if (card* c = hc.lookup(i)) d->delete_card(c);
             }

@@ -400,6 +400,9 @@ OCG_SaveStatus write_processor_unit_inner(
         const processor_unit& u,
         pb::ProcessorUnit* dst_unit,
         HandleTable<card>& hc,
+        HandleTable<effect>& he,
+        HandleTable<group>& hg,
+        const std::unordered_set<effect*>& live_effects,
         const char* list_name,
         int unit_idx,
         std::string* refuse_reason) {
@@ -582,6 +585,137 @@ OCG_SaveStatus write_processor_unit_inner(
                 m->set_repeat(v.repeat);
                 m->set_hand0(v.hand0);
                 return OCG_SAVE_OK;
+            // ── Tier 4 (chunk 9c): Process<false> non-Select variants ─────
+            } else if constexpr (std::is_same_v<T, Processors::AddChain>) {
+                auto* m = dst_unit->mutable_add_chain();
+                m->set_step(v.step);
+                m->set_is_activated_effect(v.is_activated_effect);
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::SolveChain>) {
+                auto* m = dst_unit->mutable_solve_chain();
+                m->set_step(v.step);
+                m->set_skip_trigger(v.skip_trigger);
+                m->set_skip_freechain(v.skip_freechain);
+                m->set_skip_new(v.skip_new);
+                m->set_backed_up_operation(v.backed_up_operation);
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::PointEvent>) {
+                auto* m = dst_unit->mutable_point_event();
+                m->set_step(v.step);
+                m->set_skip_trigger(v.skip_trigger);
+                m->set_skip_freechain(v.skip_freechain);
+                m->set_skip_new(v.skip_new);
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::QuickEffect>) {
+                auto* m = dst_unit->mutable_quick_effect();
+                m->set_step(v.step);
+                m->set_skip_freechain(v.skip_freechain);
+                m->set_is_opponent(v.is_opponent);
+                m->set_priority_player(v.priority_player);
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::ForcedBattle>) {
+                auto* m = dst_unit->mutable_forced_battle();
+                m->set_step(v.step);
+                m->set_backup_phase(v.backup_phase);
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::SortChain>) {
+                auto* m = dst_unit->mutable_sort_chain();
+                m->set_step(v.step);
+                m->set_playerid(v.playerid);
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::AttackDisable>) {
+                auto* m = dst_unit->mutable_attack_disable();
+                m->set_step(v.step);
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::ActivateEffect>) {
+                auto* m = dst_unit->mutable_activate_effect();
+                m->set_step(v.step);
+                m->set_peffect_handle(
+                    assign_effect_if_live(he, v.peffect, live_effects));
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::SolveContinuous>) {
+                auto* m = dst_unit->mutable_solve_continuous();
+                m->set_step(v.step);
+                m->set_reason_player(v.reason_player);
+                m->set_reason_effect_handle(
+                    assign_effect_if_live(he, v.reason_effect, live_effects));
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::ExecuteCost>) {
+                auto* m = dst_unit->mutable_execute_cost();
+                m->set_step(v.step);
+                m->set_triggering_player(v.triggering_player);
+                m->set_shuffle_check_was_disabled(v.shuffle_check_was_disabled);
+                m->set_triggering_effect_handle(
+                    assign_effect_if_live(he, v.triggering_effect, live_effects));
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::ExecuteOperation>) {
+                auto* m = dst_unit->mutable_execute_operation();
+                m->set_step(v.step);
+                m->set_triggering_player(v.triggering_player);
+                m->set_shuffle_check_was_disabled(v.shuffle_check_was_disabled);
+                m->set_triggering_effect_handle(
+                    assign_effect_if_live(he, v.triggering_effect, live_effects));
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::ExecuteTarget>) {
+                auto* m = dst_unit->mutable_execute_target();
+                m->set_step(v.step);
+                m->set_triggering_player(v.triggering_player);
+                m->set_shuffle_check_was_disabled(v.shuffle_check_was_disabled);
+                m->set_triggering_effect_handle(
+                    assign_effect_if_live(he, v.triggering_effect, live_effects));
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::MoveToField>) {
+                auto* m = dst_unit->mutable_move_to_field();
+                m->set_step(v.step);
+                m->set_enable(v.enable);
+                m->set_ret(v.ret);
+                m->set_pzone(v.pzone);
+                m->set_zone(v.zone);
+                m->set_rule(v.rule);
+                m->set_location_reason(v.location_reason);
+                m->set_confirm(v.confirm);
+                m->set_target_card_handle(hc_assign_safe(hc, v.target));
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::BattleCommand>) {
+                auto* m = dst_unit->mutable_battle_command();
+                m->set_step(v.step);
+                m->set_phase_to_change_to(v.phase_to_change_to);
+                m->set_forced_attack(v.forced_attack);
+                m->set_forced_attack_done(v.forced_attack_done);
+                m->set_is_replaying_attack(v.is_replaying_attack);
+                m->set_attack_announce_failed(v.attack_announce_failed);
+                m->set_repeat_battle_phase(v.repeat_battle_phase);
+                m->set_second_battle_phase_is_optional(
+                    v.second_battle_phase_is_optional);
+                m->set_previous_point_event_had_any_trigger_to_resolve(
+                    v.previous_point_event_had_any_trigger_to_resolve);
+                m->set_reason_player(v.reason_player);
+                m->set_damage_change_effect_handle(
+                    assign_effect_if_live(he, v.damage_change_effect, live_effects));
+                m->set_cards_destroyed_by_battle_group_handle(
+                    hg.assign(v.cards_destroyed_by_battle));
+                m->set_reason_card_handle(hc_assign_safe(hc, v.reason_card));
+                for (const auto& [peff, pcard] : v.must_attack_map) {
+                    auto* entry = m->add_must_attack_map();
+                    entry->set_effect_handle(
+                        assign_effect_if_live(he, peff, live_effects));
+                    entry->set_card_handle(hc_assign_safe(hc, pcard));
+                }
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::SelfDestroyUnique>) {
+                auto* m = dst_unit->mutable_self_destroy_unique();
+                m->set_step(v.step);
+                m->set_playerid(v.playerid);
+                m->set_unique_card_handle(hc_assign_safe(hc, v.unique_card));
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::SelectDisField>) {
+                auto* m = dst_unit->mutable_select_dis_field();
+                m->set_step(v.step);
+                m->set_playerid(v.playerid);
+                m->set_count(v.count);
+                m->set_flag(v.flag);
+                m->set_disable_field(v.disable_field);
+                return OCG_SAVE_OK;
             } else {
                 if (refuse_reason) {
                     char buf[240];
@@ -649,19 +783,21 @@ void write_processor_scratch(
 OCG_SaveStatus write_processor(const processor& core, pb::ProcessorState* dst,
                                 HandleTable<card>& hc,
                                 HandleTable<effect>& he,
-                                HandleTable<group>& /*hg*/,
+                                HandleTable<group>& hg,
                                 const std::unordered_set<effect*>& live_effects,
                                 std::string* refuse_reason) {
     int idx = 0;
     for (const auto& u : core.units) {
         OCG_SaveStatus s = write_processor_unit_inner(
-            u, dst->add_units(), hc, "units", idx++, refuse_reason);
+            u, dst->add_units(), hc, he, hg, live_effects,
+            "units", idx++, refuse_reason);
         if (s != OCG_SAVE_OK) return s;
     }
     idx = 0;
     for (const auto& u : core.subunits) {
         OCG_SaveStatus s = write_processor_unit_inner(
-            u, dst->add_subunits(), hc, "subunits", idx++, refuse_reason);
+            u, dst->add_subunits(), hc, he, hg, live_effects,
+            "subunits", idx++, refuse_reason);
         if (s != OCG_SAVE_OK) return s;
     }
 
