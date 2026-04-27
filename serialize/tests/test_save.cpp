@@ -2724,6 +2724,197 @@ bool test_chunk9e_tier6_synthetic_round_trip() {
 }
 
 // ---------------------------------------------------------------------------
+// Tier 7 (chunk 9f) — RefreshLoc / Startup / Destroy / Release /
+// DiscardHand / DiscardDeck / SortDeck / RemoveOverlay /
+// XyzOverlay / RefreshRelay synthetic round-trip (10 variants).
+// Mirrors test_chunk9e_tier6_synthetic_round_trip.
+// ---------------------------------------------------------------------------
+
+bool test_chunk9f_tier7_synthetic_round_trip() {
+    OCG_Duel orig = make_chunk5a_duel(0x9F07);
+    CHECK_TRUE(orig != nullptr, "create orig");
+    populate_simple_deck(orig);
+
+    auto* d_orig = static_cast<duel*>(orig);
+    auto& units = d_orig->game_field->core.units;
+    units.clear();
+
+    card* pcard0 = d_orig->game_field->player[0].list_main[0];
+    const uint32_t pcard0_id = pcard0->cardid;
+
+    // RefreshLoc: step=1, dis_count=2, previously_disabled_locations=0xAB,
+    //             current_disable_field_effect=nullptr.
+    Processors::emplace_variant<Processors::RefreshLoc>(
+        units, uint16_t{1});
+    if (auto* p = Processors::get_opt_variant<Processors::RefreshLoc>(
+            units.back())) {
+        p->dis_count = uint8_t{2};
+        p->previously_disabled_locations = uint32_t{0xAB};
+        p->current_disable_field_effect = nullptr;
+    }
+
+    // Startup: step=2.
+    Processors::emplace_variant<Processors::Startup>(
+        units, uint16_t{2});
+
+    // Destroy: step=3, targets=nullptr, reason_effect=nullptr,
+    //          reason=0x11, reason_player=0.
+    Processors::emplace_variant<Processors::Destroy>(
+        units, uint16_t{3},
+        static_cast<group*>(nullptr), nullptr,
+        uint32_t{0x11}, uint8_t{0});
+
+    // Release: step=4, targets=nullptr, reason_effect=nullptr,
+    //          reason=0x22, reason_player=1.
+    Processors::emplace_variant<Processors::Release>(
+        units, uint16_t{4},
+        static_cast<group*>(nullptr), nullptr,
+        uint32_t{0x22}, uint8_t{1});
+
+    // DiscardHand: step=5, playerid=0, min=1, max=2, reason=0x33.
+    Processors::emplace_variant<Processors::DiscardHand>(
+        units, uint16_t{5}, uint8_t{0}, uint8_t{1}, uint8_t{2},
+        uint32_t{0x33});
+
+    // DiscardDeck: step=6, playerid=1, count=3, reason=0x44.
+    Processors::emplace_variant<Processors::DiscardDeck>(
+        units, uint16_t{6}, uint8_t{1}, uint16_t{3}, uint32_t{0x44});
+
+    // SortDeck: step=7, sort_player=0, target_player=1, count=5, bottom=true.
+    Processors::emplace_variant<Processors::SortDeck>(
+        units, uint16_t{7}, uint8_t{0}, uint8_t{1}, uint16_t{5}, true);
+
+    // RemoveOverlay: step=8, reason=0x55, pgroup=nullptr, rplayer=0,
+    //                self=1, oppo=0, min=1, max=3.
+    //                replaced_amount=2 and has_used_overlay_remove_replace_effect=true
+    //                set post-construction.
+    Processors::emplace_variant<Processors::RemoveOverlay>(
+        units, uint16_t{8}, uint32_t{0x55},
+        static_cast<group*>(nullptr),
+        uint8_t{0}, uint8_t{1}, uint8_t{0},
+        uint16_t{1}, uint16_t{3});
+    if (auto* p = Processors::get_opt_variant<Processors::RemoveOverlay>(
+            units.back())) {
+        p->replaced_amount = uint16_t{2};
+        p->has_used_overlay_remove_replace_effect = true;
+    }
+
+    // XyzOverlay: step=9, target=pcard0, materials=nullptr,
+    //             send_materials_to_grave=true.
+    Processors::emplace_variant<Processors::XyzOverlay>(
+        units, uint16_t{9},
+        pcard0,
+        static_cast<group*>(nullptr),
+        true);
+
+    // RefreshRelay: step=10.
+    Processors::emplace_variant<Processors::RefreshRelay>(
+        units, uint16_t{10});
+
+    const size_t expected_units = units.size();
+
+    void* blob = nullptr;
+    uint32_t size = 0;
+    CHECK_EQ(OCG_DuelSaveState(orig, &blob, &size), OCG_SAVE_OK,
+             "save with all Tier 7 units");
+
+    OCG_DuelOptions opts = make_chunk5a_load_options();
+    OCG_Duel loaded = nullptr;
+    CHECK_EQ(OCG_DuelLoadState(blob, size, &opts, &loaded), OCG_LOAD_OK,
+             "load Tier 7 blob");
+
+    auto* d_loaded = static_cast<duel*>(loaded);
+    auto& ul = d_loaded->game_field->core.units;
+    CHECK_EQ(ul.size(), expected_units, "unit count round-trips");
+
+    auto it = ul.begin();
+    auto pop = [&]() -> processor_unit& { processor_unit& u = *it; ++it; return u; };
+
+    if (auto* p = Processors::get_opt_variant<Processors::RefreshLoc>(pop())) {
+        CHECK_EQ(p->step, 1,                           "RefreshLoc.step");
+        CHECK_EQ(p->dis_count, 2,                      "RefreshLoc.dis_count");
+        CHECK_EQ(p->previously_disabled_locations, 0xABu,
+                 "RefreshLoc.previously_disabled_locations");
+        CHECK_TRUE(p->current_disable_field_effect == nullptr,
+                 "RefreshLoc.current_disable_field_effect null");
+    } else { CHECK_TRUE(false, "RefreshLoc variant"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::Startup>(pop())) {
+        CHECK_EQ(p->step, 2, "Startup.step");
+    } else { CHECK_TRUE(false, "Startup variant"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::Destroy>(pop())) {
+        CHECK_EQ(p->step, 3,             "Destroy.step");
+        CHECK_EQ(p->reason_player, 0,    "Destroy.reason_player");
+        CHECK_EQ(p->reason, 0x11u,       "Destroy.reason");
+        CHECK_TRUE(p->targets == nullptr, "Destroy.targets null");
+        CHECK_TRUE(p->reason_effect == nullptr, "Destroy.reason_effect null");
+    } else { CHECK_TRUE(false, "Destroy variant"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::Release>(pop())) {
+        CHECK_EQ(p->step, 4,             "Release.step");
+        CHECK_EQ(p->reason_player, 1,    "Release.reason_player");
+        CHECK_EQ(p->reason, 0x22u,       "Release.reason");
+        CHECK_TRUE(p->targets == nullptr, "Release.targets null");
+        CHECK_TRUE(p->reason_effect == nullptr, "Release.reason_effect null");
+    } else { CHECK_TRUE(false, "Release variant"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::DiscardHand>(pop())) {
+        CHECK_EQ(p->step, 5,       "DiscardHand.step");
+        CHECK_EQ(p->playerid, 0,   "DiscardHand.playerid");
+        CHECK_EQ(p->min, 1,        "DiscardHand.min");
+        CHECK_EQ(p->max, 2,        "DiscardHand.max");
+        CHECK_EQ(p->reason, 0x33u, "DiscardHand.reason");
+    } else { CHECK_TRUE(false, "DiscardHand variant"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::DiscardDeck>(pop())) {
+        CHECK_EQ(p->step, 6,       "DiscardDeck.step");
+        CHECK_EQ(p->playerid, 1,   "DiscardDeck.playerid");
+        CHECK_EQ(p->count, 3,      "DiscardDeck.count");
+        CHECK_EQ(p->reason, 0x44u, "DiscardDeck.reason");
+    } else { CHECK_TRUE(false, "DiscardDeck variant"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::SortDeck>(pop())) {
+        CHECK_EQ(p->step, 7,          "SortDeck.step");
+        CHECK_EQ(p->sort_player, 0,   "SortDeck.sort_player");
+        CHECK_EQ(p->target_player, 1, "SortDeck.target_player");
+        CHECK_EQ(p->count, 5,         "SortDeck.count");
+        CHECK_TRUE(p->bottom,         "SortDeck.bottom");
+    } else { CHECK_TRUE(false, "SortDeck variant"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::RemoveOverlay>(pop())) {
+        CHECK_EQ(p->step, 8,           "RemoveOverlay.step");
+        CHECK_EQ(p->min, 1,            "RemoveOverlay.min");
+        CHECK_EQ(p->max, 3,            "RemoveOverlay.max");
+        CHECK_EQ(p->replaced_amount, 2, "RemoveOverlay.replaced_amount");
+        CHECK_TRUE(p->has_used_overlay_remove_replace_effect,
+                   "RemoveOverlay.has_used_overlay_remove_replace_effect");
+        CHECK_EQ(p->rplayer, 0,        "RemoveOverlay.rplayer");
+        CHECK_EQ(p->self, 1,           "RemoveOverlay.self");
+        CHECK_EQ(p->oppo, 0,           "RemoveOverlay.oppo");
+        CHECK_EQ(p->reason, 0x55u,     "RemoveOverlay.reason");
+        CHECK_TRUE(p->pgroup == nullptr, "RemoveOverlay.pgroup null");
+    } else { CHECK_TRUE(false, "RemoveOverlay variant"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::XyzOverlay>(pop())) {
+        CHECK_EQ(p->step, 9,                    "XyzOverlay.step");
+        CHECK_TRUE(p->send_materials_to_grave,  "XyzOverlay.send_materials_to_grave");
+        CHECK_TRUE(p->target != nullptr,        "XyzOverlay.target non-null");
+        CHECK_EQ(p->target->cardid, pcard0_id,  "XyzOverlay.target cardid");
+        CHECK_TRUE(p->materials == nullptr,     "XyzOverlay.materials null");
+    } else { CHECK_TRUE(false, "XyzOverlay variant"); }
+
+    if (auto* p = Processors::get_opt_variant<Processors::RefreshRelay>(pop())) {
+        CHECK_EQ(p->step, 10, "RefreshRelay.step");
+    } else { CHECK_TRUE(false, "RefreshRelay variant"); }
+
+    OCG_FreeSaveBuffer(blob);
+    OCG_DestroyDuel(orig);
+    OCG_DestroyDuel(loaded);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // Free-buffer is safe on null
 // ---------------------------------------------------------------------------
 
@@ -2817,6 +3008,11 @@ int main() {
         // Chunk 9e Tier 6 — Draw / Damage / DamageStep / Equip cluster
         {"chunk9e_tier6_synthetic_round_trip",
          &test_chunk9e_tier6_synthetic_round_trip},
+        // Chunk 9f Tier 7 — RefreshLoc / Startup / Destroy / Release /
+        //   DiscardHand / DiscardDeck / SortDeck / RemoveOverlay /
+        //   XyzOverlay / RefreshRelay
+        {"chunk9f_tier7_synthetic_round_trip",
+         &test_chunk9f_tier7_synthetic_round_trip},
         // Chunk 4 perf scaffold (informational; not gated)
         {"perf_scaffold_vanilla", &test_perf_scaffold_vanilla},
     };

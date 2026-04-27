@@ -595,6 +595,19 @@ message ProcessorUnit {
         ProcRemoveCounter      remove_counter         = 158;
         ProcTossCoin           toss_coin              = 159;
         ProcTossDice           toss_dice              = 160;
+        // ── Tier 7 (chunk 9f): RefreshLoc / Startup / Destroy / Release /
+        //    DiscardHand / DiscardDeck / SortDeck / RemoveOverlay /
+        //    XyzOverlay / RefreshRelay ──
+        ProcRefreshLoc         refresh_loc            = 161;
+        ProcStartup            startup                = 162;
+        ProcDestroy            destroy                = 163;
+        ProcRelease            release                = 164;
+        ProcDiscardHand        discard_hand           = 165;
+        ProcDiscardDeck        discard_deck           = 166;
+        ProcSortDeck           sort_deck              = 167;
+        ProcRemoveOverlay      remove_overlay         = 168;
+        ProcXyzOverlay         xyz_overlay            = 169;
+        ProcRefreshRelay       refresh_relay          = 170;
     }
 }
 
@@ -1266,4 +1279,98 @@ message ProcTossDice {
     uint32 count1 = 4;               // uint8 in C++ (player 0 dice count)
     uint32 count2 = 5;               // uint8 in C++ (player 1 dice count)
     uint32 reason_effect_handle = 6; // → EffectRecord; 0 = none/freed
+}
+
+// ---------------------------------------------------------------------------
+// Tier 7 (chunk 9f): RefreshLoc / Startup / Destroy / Release / DiscardHand /
+// DiscardDeck / SortDeck / RemoveOverlay / XyzOverlay / RefreshRelay.
+// These cover field/zone refresh, duel startup, card destruction, tribute
+// release, hand/deck discard, deck sorting, XYZ overlay operations, and
+// relay-trigger refresh.
+// ---------------------------------------------------------------------------
+
+// RefreshLoc: field/zone disable-flag refresh pass.
+message ProcRefreshLoc {
+    uint32 step = 1;
+    uint32 dis_count = 2;                           // uint8 in C++
+    uint32 previously_disabled_locations = 3;       // uint32 in C++
+    uint32 current_disable_field_effect_handle = 4; // → EffectRecord; 0 = nullptr
+}
+
+// Startup: initial duel startup processing — no payload beyond step.
+message ProcStartup {
+    uint32 step = 1;
+}
+
+// Destroy: card destruction processing.
+message ProcDestroy {
+    uint32 step = 1;
+    uint32 reason_player = 2;         // uint8 in C++
+    uint32 reason = 3;                // uint32 in C++
+    uint32 targets_group_handle = 4;  // → GroupRecord; 0 = nullptr
+    uint32 reason_effect_handle = 5;  // → EffectRecord; 0 = none/freed
+}
+
+// Release: tribute/cost release processing.
+message ProcRelease {
+    uint32 step = 1;
+    uint32 reason_player = 2;         // uint8 in C++
+    uint32 reason = 3;                // uint32 in C++
+    uint32 targets_group_handle = 4;  // → GroupRecord; 0 = nullptr
+    uint32 reason_effect_handle = 5;  // → EffectRecord; 0 = none/freed
+}
+
+// DiscardHand: player-choice hand discard (e.g. Graceful Charity discard 2).
+message ProcDiscardHand {
+    uint32 step = 1;
+    uint32 playerid = 2;              // uint8 in C++
+    uint32 min = 3;                   // uint8 in C++
+    uint32 max = 4;                   // uint8 in C++
+    uint32 reason = 5;                // uint32 in C++
+}
+
+// DiscardDeck: mill N cards from a player's deck.
+message ProcDiscardDeck {
+    uint32 step = 1;
+    uint32 count = 2;                 // uint16 in C++
+    uint32 playerid = 3;              // uint8 in C++
+    uint32 reason = 4;                // uint32 in C++
+}
+
+// SortDeck: sort the top N cards of a player's deck.
+message ProcSortDeck {
+    uint32 step = 1;
+    uint32 count = 2;                 // uint16 in C++
+    uint32 sort_player = 3;           // uint8 in C++
+    uint32 target_player = 4;         // uint8 in C++
+    bool bottom = 5;
+}
+
+// RemoveOverlay: remove XYZ overlay units from a monster.
+// replaced_amount and has_used_overlay_remove_replace_effect are
+// mutable mid-processing; both are set post-construction.
+message ProcRemoveOverlay {
+    uint32 step = 1;
+    uint32 min = 2;                   // uint16 in C++
+    uint32 max = 3;                   // uint16 in C++
+    uint32 replaced_amount = 4;       // uint16 in C++
+    bool has_used_overlay_remove_replace_effect = 5;
+    uint32 rplayer = 6;               // uint8 in C++
+    uint32 self = 7;                  // uint8 in C++
+    uint32 oppo = 8;                  // uint8 in C++
+    uint32 reason = 9;                // uint32 in C++
+    uint32 pgroup_handle = 10;        // → GroupRecord; 0 = nullptr
+}
+
+// XyzOverlay: attach materials as XYZ overlay units to a target monster.
+message ProcXyzOverlay {
+    uint32 step = 1;
+    bool send_materials_to_grave = 2;
+    uint32 target_card_handle = 3;    // → CardRecord; 0 = nullptr
+    uint32 materials_group_handle = 4; // → GroupRecord; 0 = nullptr
+}
+
+// RefreshRelay: relay/trigger-window refresh pass — no payload beyond step.
+message ProcRefreshRelay {
+    uint32 step = 1;
 }

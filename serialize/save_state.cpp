@@ -926,6 +926,87 @@ OCG_SaveStatus write_processor_unit_inner(
                 m->set_reason_effect_handle(
                     assign_effect_if_live(he, v.reason_effect, live_effects));
                 return OCG_SAVE_OK;
+            // ── Tier 7 (chunk 9f): RefreshLoc / Startup / Destroy / Release /
+            //    DiscardHand / DiscardDeck / SortDeck / RemoveOverlay /
+            //    XyzOverlay / RefreshRelay ──
+            } else if constexpr (std::is_same_v<T, Processors::RefreshLoc>) {
+                auto* m = dst_unit->mutable_refresh_loc();
+                m->set_step(v.step);
+                m->set_dis_count(v.dis_count);
+                m->set_previously_disabled_locations(v.previously_disabled_locations);
+                m->set_current_disable_field_effect_handle(
+                    assign_effect_if_live(he, v.current_disable_field_effect, live_effects));
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::Startup>) {
+                auto* m = dst_unit->mutable_startup();
+                m->set_step(v.step);
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::Destroy>) {
+                auto* m = dst_unit->mutable_destroy();
+                m->set_step(v.step);
+                m->set_reason_player(v.reason_player);
+                m->set_reason(v.reason);
+                m->set_targets_group_handle(hg.assign(v.targets));
+                m->set_reason_effect_handle(
+                    assign_effect_if_live(he, v.reason_effect, live_effects));
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::Release>) {
+                auto* m = dst_unit->mutable_release();
+                m->set_step(v.step);
+                m->set_reason_player(v.reason_player);
+                m->set_reason(v.reason);
+                m->set_targets_group_handle(hg.assign(v.targets));
+                m->set_reason_effect_handle(
+                    assign_effect_if_live(he, v.reason_effect, live_effects));
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::DiscardHand>) {
+                auto* m = dst_unit->mutable_discard_hand();
+                m->set_step(v.step);
+                m->set_playerid(v.playerid);
+                m->set_min(v.min);
+                m->set_max(v.max);
+                m->set_reason(v.reason);
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::DiscardDeck>) {
+                auto* m = dst_unit->mutable_discard_deck();
+                m->set_step(v.step);
+                m->set_count(v.count);
+                m->set_playerid(v.playerid);
+                m->set_reason(v.reason);
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::SortDeck>) {
+                auto* m = dst_unit->mutable_sort_deck();
+                m->set_step(v.step);
+                m->set_count(v.count);
+                m->set_sort_player(v.sort_player);
+                m->set_target_player(v.target_player);
+                m->set_bottom(v.bottom);
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::RemoveOverlay>) {
+                auto* m = dst_unit->mutable_remove_overlay();
+                m->set_step(v.step);
+                m->set_min(v.min);
+                m->set_max(v.max);
+                m->set_replaced_amount(v.replaced_amount);
+                m->set_has_used_overlay_remove_replace_effect(
+                    v.has_used_overlay_remove_replace_effect);
+                m->set_rplayer(v.rplayer);
+                m->set_self(v.self);
+                m->set_oppo(v.oppo);
+                m->set_reason(v.reason);
+                m->set_pgroup_handle(hg.assign(v.pgroup));
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::XyzOverlay>) {
+                auto* m = dst_unit->mutable_xyz_overlay();
+                m->set_step(v.step);
+                m->set_send_materials_to_grave(v.send_materials_to_grave);
+                m->set_target_card_handle(hc_assign_safe(hc, v.target));
+                m->set_materials_group_handle(hg.assign(v.materials));
+                return OCG_SAVE_OK;
+            } else if constexpr (std::is_same_v<T, Processors::RefreshRelay>) {
+                auto* m = dst_unit->mutable_refresh_relay();
+                m->set_step(v.step);
+                return OCG_SAVE_OK;
             } else {
                 if (refuse_reason) {
                     char buf[240];

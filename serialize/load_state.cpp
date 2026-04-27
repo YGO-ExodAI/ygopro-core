@@ -982,6 +982,112 @@ bool load_processor_unit_into(
                 static_cast<uint8_t>(m.count2()));
             return true;
         }
+        // ── Tier 7 (chunk 9f): RefreshLoc / Startup / Destroy / Release /
+        //    DiscardHand / DiscardDeck / SortDeck / RemoveOverlay /
+        //    XyzOverlay / RefreshRelay ──
+        case ocg::state::ProcessorUnit::kRefreshLoc: {
+            const auto& m = src_unit.refresh_loc();
+            Processors::emplace_variant<Processors::RefreshLoc>(
+                dst, static_cast<uint16_t>(m.step()));
+            if (auto* p = Processors::get_opt_variant<Processors::RefreshLoc>(
+                    dst.back())) {
+                p->dis_count = static_cast<uint8_t>(m.dis_count());
+                p->previously_disabled_locations = m.previously_disabled_locations();
+                p->current_disable_field_effect =
+                    he.lookup(m.current_disable_field_effect_handle());
+            }
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kStartup: {
+            const auto& m = src_unit.startup();
+            Processors::emplace_variant<Processors::Startup>(
+                dst, static_cast<uint16_t>(m.step()));
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kDestroy: {
+            const auto& m = src_unit.destroy();
+            effect* reff = he.lookup(m.reason_effect_handle());
+            group* targets = hg.lookup(m.targets_group_handle());
+            Processors::emplace_variant<Processors::Destroy>(
+                dst, static_cast<uint16_t>(m.step()),
+                targets, reff, m.reason(),
+                static_cast<uint8_t>(m.reason_player()));
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kRelease: {
+            const auto& m = src_unit.release();
+            effect* reff = he.lookup(m.reason_effect_handle());
+            group* targets = hg.lookup(m.targets_group_handle());
+            Processors::emplace_variant<Processors::Release>(
+                dst, static_cast<uint16_t>(m.step()),
+                targets, reff, m.reason(),
+                static_cast<uint8_t>(m.reason_player()));
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kDiscardHand: {
+            const auto& m = src_unit.discard_hand();
+            Processors::emplace_variant<Processors::DiscardHand>(
+                dst, static_cast<uint16_t>(m.step()),
+                static_cast<uint8_t>(m.playerid()),
+                static_cast<uint8_t>(m.min()),
+                static_cast<uint8_t>(m.max()),
+                m.reason());
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kDiscardDeck: {
+            const auto& m = src_unit.discard_deck();
+            Processors::emplace_variant<Processors::DiscardDeck>(
+                dst, static_cast<uint16_t>(m.step()),
+                static_cast<uint8_t>(m.playerid()),
+                static_cast<uint16_t>(m.count()),
+                m.reason());
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kSortDeck: {
+            const auto& m = src_unit.sort_deck();
+            Processors::emplace_variant<Processors::SortDeck>(
+                dst, static_cast<uint16_t>(m.step()),
+                static_cast<uint8_t>(m.sort_player()),
+                static_cast<uint8_t>(m.target_player()),
+                static_cast<uint16_t>(m.count()),
+                m.bottom());
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kRemoveOverlay: {
+            const auto& m = src_unit.remove_overlay();
+            group* pgroup = hg.lookup(m.pgroup_handle());
+            Processors::emplace_variant<Processors::RemoveOverlay>(
+                dst, static_cast<uint16_t>(m.step()),
+                m.reason(), pgroup,
+                static_cast<uint8_t>(m.rplayer()),
+                static_cast<uint8_t>(m.self()),
+                static_cast<uint8_t>(m.oppo()),
+                static_cast<uint16_t>(m.min()),
+                static_cast<uint16_t>(m.max()));
+            if (auto* p = Processors::get_opt_variant<Processors::RemoveOverlay>(
+                    dst.back())) {
+                p->replaced_amount = static_cast<uint16_t>(m.replaced_amount());
+                p->has_used_overlay_remove_replace_effect =
+                    m.has_used_overlay_remove_replace_effect();
+            }
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kXyzOverlay: {
+            const auto& m = src_unit.xyz_overlay();
+            card* target = hc.lookup(m.target_card_handle());
+            group* materials = hg.lookup(m.materials_group_handle());
+            Processors::emplace_variant<Processors::XyzOverlay>(
+                dst, static_cast<uint16_t>(m.step()),
+                target, materials,
+                m.send_materials_to_grave());
+            return true;
+        }
+        case ocg::state::ProcessorUnit::kRefreshRelay: {
+            const auto& m = src_unit.refresh_relay();
+            Processors::emplace_variant<Processors::RefreshRelay>(
+                dst, static_cast<uint16_t>(m.step()));
+            return true;
+        }
         case ocg::state::ProcessorUnit::UNIT_NOT_SET:
             if (load_error) {
                 *load_error = "ProcessorUnit in '" +
